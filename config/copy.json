@@ -1,0 +1,95 @@
+{
+  "brand": "FigurinhaJá",
+  "home": {
+    "headline": "Crie suas figurinhas em poucos segundos",
+    "subheadline": "Escolha uma opção, envie suas fotos e veja como fica.",
+    "benefits": ["Fácil de fazer", "Resultado rápido", "Pagamento seguro"],
+    "cta": "COMEÇAR AGORA"
+  },
+  "produto": {
+    "title": "O que você quer criar?",
+    "cta": "CONTINUAR"
+  },
+  "candidato": {
+    "title": "Escolha o candidato",
+    "customPrompt": "Envie a foto do seu candidato",
+    "cta": "CONTINUAR"
+  },
+  "fotos": {
+    "userTitle": "Envie sua foto",
+    "userHint": "Escolha uma foto mostrando bem o rosto.",
+    "candidateTitle": "Envie a foto do candidato",
+    "candidateHint": "Escolha uma foto mostrando bem o rosto.",
+    "pick": "ESCOLHER FOTO",
+    "change": "TROCAR FOTO",
+    "added": "Foto adicionada",
+    "cta": "CONTINUAR"
+  },
+  "personalizar": {
+    "title": "Quer colocar seu nome ou uma frase?",
+    "explain": "É opcional. Se preferir, criamos automaticamente.",
+    "optionAuto": "Não, pode criar automaticamente",
+    "optionManual": "Sim, quero escrever",
+    "fieldLabel": "Digite um nome ou frase curta",
+    "examples": ["Maria", "João", "Tamo Junto", "É Nóis", "Brasil"],
+    "maxLength": 24,
+    "cta": "CONTINUAR"
+  },
+  "quantidade": {
+    "title": "Quantas figurinhas você quer?",
+    "cta": "CRIAR MINHAS FIGURINHAS"
+  },
+  "gerando": {
+    "title": "Estamos criando...",
+    "steps": ["Fotos recebidas", "Preparando as imagens", "Criando seu resultado"],
+    "wait": "Só mais alguns segundos..."
+  },
+  "preview": {
+    "title": "Seu resultado está pronto! 🎉",
+    "text": "Veja uma prévia abaixo.",
+    "lockedNote": "Prévia protegida",
+    "unlockCopy": "Desbloqueie para baixar tudo em alta qualidade.",
+    "ctaPrefix": "DESBLOQUEAR POR",
+    "reassurance": ["Pagamento seguro", "Liberação imediata"],
+    "aiDisclosure": "Imagem criada por IA. Montagem ilustrativa, não representa um encontro real."
+  },
+  "checkout": {
+    "title": "Pagamento",
+    "methods": ["PIX", "Cartão"],
+    "reassurance": ["Pagamento seguro", "Liberação imediata após o pagamento"],
+    "mockNote": "Ambiente de teste — nenhum valor será cobrado.",
+    "simulateApprove": "Simular pagamento aprovado",
+    "simulateReject": "Simular pagamento recusado"
+  },
+  "aprovado": {
+    "title": "Pagamento aprovado! ✓",
+    "text": "Seu resultado já está liberado.",
+    "downloadAll": "BAIXAR TUDO",
+    "addWhatsapp": "ADICIONAR AO WHATSAPP",
+    "againTitle": "Quer criar mais?",
+    "againText": "Faça outro pack, escolha outro candidato ou use outra foto.",
+    "againCta": "CRIAR NOVAMENTE"
+  },
+  "trust": {
+    "securePayment": "Pagamento seguro",
+    "photoUse": "Suas fotos são usadas para criar seu resultado",
+    "instantRelease": "Liberação imediata após o pagamento"
+  },
+  "errors": {
+    "invalidPhoto": "Não conseguimos usar essa foto. Escolha outra foto em que o rosto apareça melhor.",
+    "photoTooBig": "Essa foto é muito pesada. Escolha uma foto menor ou tire uma nova.",
+    "uploadInterrupted": "O envio da foto foi interrompido. Toque em tentar de novo.",
+    "generationFailed": "Não conseguimos criar seu resultado desta vez. Toque em tentar de novo — você não será cobrado.",
+    "generationSlow": "Está demorando um pouco mais que o normal. Aguarde só mais um instante.",
+    "paymentPending": "Seu pagamento está sendo confirmado. Assim que aprovar, seu resultado aparece aqui automaticamente.",
+    "paymentRejected": "O pagamento não foi aprovado. Você pode tentar de novo com outro cartão ou pelo PIX.",
+    "downloadFailed": "Não conseguimos baixar agora. Toque em baixar de novo.",
+    "sessionLost": "Não encontramos seu resultado. Vamos começar de novo?",
+    "tryAgain": "Tentar de novo"
+  },
+  "footer": {
+    "terms": "Termos de Uso",
+    "privacy": "Política de Privacidade",
+    "contact": "Contato / Suporte"
+  }
+}

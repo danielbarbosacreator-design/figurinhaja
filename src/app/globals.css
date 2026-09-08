@@ -1,0 +1,235 @@
+@import "tailwindcss";
+
+/*
+ * ============================================================
+ * DESIGN SYSTEM — FigurinhaJá
+ * Identidade: moderna, divertida, tecnológica e acessível.
+ * Mobile-first · 390×844 como viewport principal.
+ * ============================================================
+ *
+ * PALETA DA MARCA
+ *  Roxo    #6D28D9 → cor principal: títulos, destaques, seleção, identidade
+ *  Amarelo #FBBF24 → cor de AÇÃO (CTA) e detalhes: use com moderação
+ *  Navy    #0F172A → fundos escuros, tipografia forte, contraste
+ *  Off-white #F8FAFC → fundos claros, muito espaço negativo
+ *  Branco  #FFFFFF → superfícies, bordas de sticker
+ *
+ *  Verde/vermelho aparecem SÓ como feedback funcional (sucesso/erro),
+ *  nunca como identidade. Nada de azul/verde/vermelho partidário.
+ *
+ * TIPOGRAFIA — sistema de duas fontes
+ *  Poppins ExtraBold/Black → SÓ logo, headlines, capas e títulos de marketing
+ *  Inter → TODA a interface do app (títulos Bold · botões Semibold/Bold · texto Regular)
+ *  Corpo padrão 16px. Legibilidade máxima, inclusive 60+.
+ *
+ * OBJETIVO: "Marca divertida por fora. App extremamente simples por dentro."
+ */
+
+:root {
+  /* ── Base neutra (rampa slate, casa com o navy) ── */
+  --background: #f8fafc;
+  --surface: #ffffff;
+  --foreground: #0f172a;
+  --muted: #64748b;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+
+  /* ── Primário: ROXO (identidade) ── */
+  --primary: #6d28d9;
+  --primary-dark: #5b21b6;
+  --primary-light: #7c3aed;
+  --primary-tint: #f5f3ff;
+  --primary-tint-strong: #ede9fe;
+  --primary-ring: rgba(109, 40, 217, 0.14);
+
+  /* ── Ação: AMARELO (CTA / detalhes) ── */
+  --accent: #fbbf24;
+  --accent-dark: #f59e0b;
+  --accent-ink: #0f172a; /* texto sobre amarelo */
+  --accent-tint: #fef9ec;
+  --accent-underline: rgba(251, 191, 36, 0.55);
+
+  /* ── Contraste: NAVY ── */
+  --navy: #0f172a;
+  --navy-mid: #1e293b;
+  --navy-light: #334155;
+
+  /* ── Feedback funcional (não-identidade) ── */
+  --success: #16a34a;
+  --success-dark: #0d7a35;
+  --success-tint: #f0fdf4;
+  --danger: #dc2626;
+  --danger-tint: #fef2f2;
+
+  /* ── Sombras ── */
+  --shadow-sm: 0 1px 3px 0 rgb(15 23 42 / 0.06), 0 1px 2px -1px rgb(15 23 42 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(15 23 42 / 0.08), 0 2px 4px -2px rgb(15 23 42 / 0.05);
+  --shadow-lg: 0 10px 15px -3px rgb(15 23 42 / 0.10), 0 4px 6px -4px rgb(15 23 42 / 0.05);
+  --shadow-card: 0 2px 8px 0 rgb(15 23 42 / 0.07);
+  --shadow-cta: 0 6px 20px -4px rgb(251 191 36 / 0.55);
+
+  --ring: #6d28d9;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+
+  --color-primary: var(--primary);
+  --color-primary-dark: var(--primary-dark);
+  --color-primary-light: var(--primary-light);
+  --color-primary-tint: var(--primary-tint);
+  --color-primary-strong: var(--primary-dark);
+
+  --color-accent: var(--accent);
+  --color-accent-dark: var(--accent-dark);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-tint: var(--accent-tint);
+
+  --color-navy: var(--navy);
+  --color-navy-mid: var(--navy-mid);
+  --color-navy-light: var(--navy-light);
+
+  --color-success: var(--success);
+  --color-success-dark: var(--success-dark);
+  --color-success-tint: var(--success-tint);
+  --color-danger: var(--danger);
+
+  --font-sans: var(--font-sans), "Inter", system-ui, -apple-system, "Segoe UI",
+    Roboto, Helvetica, Arial, sans-serif;
+  --font-display: var(--font-display), "Poppins", var(--font-sans);
+}
+
+/* Fonte de marca — só logo, headlines e títulos de marketing */
+.font-display {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+/* ── Reset & Base ── */
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.5;
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Títulos herdam o peso forte da marca */
+h1, h2, h3 {
+  letter-spacing: -0.02em;
+}
+
+/* ── Touch targets ── */
+button,
+a[role="button"],
+label[role="button"] {
+  min-height: 44px;
+}
+
+/* ── Focus visible ── */
+*:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* ── Animações de micro-interação ── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+
+@keyframes spin-smooth {
+  to { transform: rotate(360deg); }
+}
+
+.animate-fade-in    { animation: fadeIn 0.3s ease both; }
+.animate-slide-up   { animation: slideUp 0.4s ease both; }
+.animate-pulse-dot  { animation: pulse-dot 1.2s ease-in-out infinite; }
+
+/* ── Superfície escura (hero, footer) — navy quase plano ── */
+.hero-gradient {
+  background: linear-gradient(165deg, #0f172a 0%, #1e293b 100%);
+}
+
+/* ── Sublinhado amarelo "à mão" — destaque de marca ──
+   Aplicar em <span> dentro de um título. */
+.ink-underline {
+  background-image: linear-gradient(
+    transparent 62%,
+    var(--accent-underline) 62%,
+    var(--accent-underline) 92%,
+    transparent 92%
+  );
+  background-repeat: no-repeat;
+  padding-inline: 0.05em;
+}
+
+/* ── Traço amarelo curvo (SVG decorativo) ── */
+.ink-stroke {
+  color: var(--accent);
+}
+
+/* ── Card hover ── */
+.card-hover {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.card-hover:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+.card-hover:active {
+  transform: translateY(0);
+}
+
+/* ── Spinner roxo ── */
+.spinner-brand {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  border: 5px solid var(--primary-tint-strong);
+  border-top-color: var(--primary);
+  animation: spin-smooth 0.9s linear infinite;
+}
+
+/* ── Moldura de sticker (borda branca, sombra, radius) ── */
+.sticker-frame {
+  border-radius: 20px;
+  border: 4px solid #fff;
+  box-shadow: 0 4px 16px rgb(15 23 42 / 0.18);
+  overflow: hidden;
+}
+
+/* Pequenos "stickers" inclinados — detalhe gráfico discreto */
+.tilt-left  { transform: rotate(-3deg); }
+.tilt-right { transform: rotate(3deg); }
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

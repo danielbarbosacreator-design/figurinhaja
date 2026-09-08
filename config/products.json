@@ -1,0 +1,53 @@
+{
+  "currency": "BRL",
+  "packs": [
+    {
+      "id": "pack-5",
+      "label": "5 figurinhas",
+      "quantity": 5,
+      "priceCents": 990,
+      "recommended": false
+    },
+    {
+      "id": "pack-10",
+      "label": "10 figurinhas",
+      "quantity": 10,
+      "priceCents": 1490,
+      "recommended": true,
+      "badge": "Mais escolhido"
+    },
+    {
+      "id": "pack-20",
+      "label": "20 figurinhas",
+      "quantity": 20,
+      "priceCents": 1990,
+      "recommended": false
+    }
+  ],
+  "photo": {
+    "id": "photo-1",
+    "label": "1 foto personalizada",
+    "quantity": 1,
+    "priceCents": 1290
+  },
+  "flows": {
+    "candidate_pack": {
+      "title": "Figurinhas do candidato",
+      "subtitle": "Um pack só com ele.",
+      "needsUserPhoto": false,
+      "usesPacks": true
+    },
+    "user_candidate_pack": {
+      "title": "Figurinhas minhas com o candidato",
+      "subtitle": "Você na foto junto com ele.",
+      "needsUserPhoto": true,
+      "usesPacks": true
+    },
+    "user_photo": {
+      "title": "Uma foto minha com o candidato",
+      "subtitle": "Uma imagem para postar ou compartilhar.",
+      "needsUserPhoto": true,
+      "usesPacks": false
+    }
+  }
+}

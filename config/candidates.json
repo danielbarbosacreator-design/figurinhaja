@@ -1,0 +1,55 @@
+{
+  "allowCustomCandidate": true,
+  "customCandidateLabel": "Outro candidato",
+  "categories": [
+    { "id": "presidente", "label": "Presidente" },
+    { "id": "deputado-federal", "label": "Deputado Federal" },
+    { "id": "deputado-estadual", "label": "Deputado Estadual" },
+    { "id": "senador", "label": "Senador" },
+    { "id": "outro", "label": "Outro político" }
+  ],
+  "featured": [
+    {
+      "id": "lula",
+      "name": "Lula",
+      "categoryId": "presidente",
+      "photo": "/Img/Candidatos%20Presidente/Lula.png",
+      "active": true
+    },
+    {
+      "id": "flavio",
+      "name": "Flávio",
+      "categoryId": "presidente",
+      "photo": "/Img/Candidatos%20Presidente/Flavio.png",
+      "active": true
+    },
+    {
+      "id": "renan",
+      "name": "Renan",
+      "categoryId": "presidente",
+      "photo": "/Img/Candidatos%20Presidente/Renan.png",
+      "active": true
+    },
+    {
+      "id": "ronaldo",
+      "name": "Ronaldo",
+      "categoryId": "presidente",
+      "photo": "/Img/Candidatos%20Presidente/Ronaldo.png",
+      "active": true
+    },
+    {
+      "id": "romeu-zema",
+      "name": "Romeu Zema",
+      "categoryId": "presidente",
+      "photo": "/Img/Candidatos%20Presidente/Romeu%20Zema.png",
+      "active": true
+    },
+    {
+      "id": "augusto-cury",
+      "name": "Augusto Cury",
+      "categoryId": "presidente",
+      "photo": "/Img/Candidatos%20Presidente/Augusto%20Cury.png",
+      "active": true
+    }
+  ]
+}
