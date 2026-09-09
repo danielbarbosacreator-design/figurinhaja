@@ -36,21 +36,30 @@ function apiKey(): string {
   return k;
 }
 
-/** Sobe a referência num host temporário e devolve URL pública direta. */
+/**
+ * Sobe a referência num host temporário e devolve URL pública que serve os
+ * bytes crus da imagem (a Kie baixa essa URL como `inputImage`).
+ *
+ * Usa catbox.moe: o tmpfiles.org passou a responder com uma página HTML no
+ * lugar do arquivo, e a Kie ficava presa em "processing" até o timeout.
+ * catbox NÃO expira sozinho — aceitável só enquanto isto é andaime da Fase 3;
+ * na Fase 2 a referência vira URL assinada do Supabase Storage (privada).
+ */
 async function uploadTemp(ref: ImageRef): Promise<string> {
   const ext = ref.mimeType.includes("png") ? "png" : ref.mimeType.includes("webp") ? "webp" : "jpg";
   const form = new FormData();
+  form.append("reqtype", "fileupload");
   form.append(
-    "file",
+    "fileToUpload",
     new Blob([Buffer.from(ref.data, "base64")], { type: ref.mimeType }),
     `ref.${ext}`,
   );
-  const res = await fetch("https://tmpfiles.org/api/v1/upload", { method: "POST", body: form });
-  if (!res.ok) throw new Error(`upload ${res.status}`);
-  const j = (await res.json()) as { data?: { url?: string } };
-  const page = j.data?.url;
-  if (!page) throw new Error("upload sem URL");
-  return page.replace("tmpfiles.org/", "tmpfiles.org/dl/"); // link direto
+  const res = await fetch("https://catbox.moe/user/api.php", { method: "POST", body: form });
+  const url = (await res.text()).trim();
+  if (!res.ok || !/^https?:\/\/\S+$/.test(url)) {
+    throw new Error(`upload ${res.status} ${url.slice(0, 120)}`);
+  }
+  return url;
 }
 
 /** ≤125 chars, PT (Kie traduz com enableTranslation). */

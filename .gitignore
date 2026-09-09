@@ -2,3 +2,7 @@ node_modules
 ._*
 .next
 .DS_Store
+.env*.local
+
+# build cache
+/tsconfig.tsbuildinfo

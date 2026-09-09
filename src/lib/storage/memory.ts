@@ -51,7 +51,12 @@ export const memoryStorage: Storage = {
     return put(bytes, contentType);
   },
   async signedDownloadUrl(key, expiresInSeconds = 300) {
-    const id = key.startsWith(PREFIX) ? key.slice(PREFIX.length) : key;
+    // Se não for uma chave de blob em memória (`mem:<uuid>`), não há bytes p/
+    // assinar. Acontece quando GENERATION_PROVIDER=mock: o "original" já é uma
+    // URL servível (/api/mock-image?...). Devolve como está em vez de montar
+    // um /api/blob/... inválido.
+    if (!key.startsWith(PREFIX)) return key;
+    const id = key.slice(PREFIX.length);
     const exp = Date.now() + expiresInSeconds * 1000;
     const sig = sign(id, exp);
     return `/api/blob/${id}?exp=${exp}&sig=${sig}`;

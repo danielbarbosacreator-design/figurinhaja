@@ -111,7 +111,9 @@ export default function GerandoPage() {
       }
       const elapsed = Date.now() - startedAt.current;
       // Rede de segurança: nunca deixa a tela girando pra sempre no 94%.
-      if (elapsed > 60_000) {
+      // Geração real (FLUX/Kie) leva ~15-60s por figurinha e um pack de 20 roda
+      // em lotes sequenciais — pode passar de 5 min. Só desiste depois disso.
+      if (elapsed > 480_000) {
         setPhase("failed");
         return true;
       }
