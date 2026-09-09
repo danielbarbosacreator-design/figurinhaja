@@ -53,18 +53,21 @@ export async function GET(
 /** Envolve o bitmap num SVG com marca d'água diagonal (sem dependência de imagem raster). */
 function watermarkedSvg(mime: string, bytes: Buffer): string {
   const dataUri = `data:${mime};base64,${bytes.toString("base64")}`;
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  // 1024px: a prévia acompanha a resolução maior do original (FLUX + upscale)
+  // e não fica borrada em telas retina. Continua sendo teaser com marca d'água.
+  const S = 1024;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${S}" height="${S}" viewBox="0 0 ${S} ${S}">
   <defs>
-    <pattern id="wm" width="150" height="150" patternUnits="userSpaceOnUse" patternTransform="rotate(-30)">
-      <text x="0" y="70" font-family="Inter, system-ui, sans-serif" font-size="22" font-weight="700" fill="#ffffff" fill-opacity="0.30">PRÉVIA</text>
+    <pattern id="wm" width="300" height="300" patternUnits="userSpaceOnUse" patternTransform="rotate(-30)">
+      <text x="0" y="140" font-family="Inter, system-ui, sans-serif" font-size="44" font-weight="700" fill="#ffffff" fill-opacity="0.30">PRÉVIA</text>
     </pattern>
     <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0.7" stop-color="#0F172A" stop-opacity="0"/>
       <stop offset="1" stop-color="#0F172A" stop-opacity="0.28"/>
     </linearGradient>
   </defs>
-  <image href="${dataUri}" x="0" y="0" width="512" height="512" preserveAspectRatio="xMidYMid slice"/>
-  <rect width="512" height="512" fill="url(#fade)"/>
-  <rect width="512" height="512" fill="url(#wm)"/>
+  <image href="${dataUri}" x="0" y="0" width="${S}" height="${S}" preserveAspectRatio="xMidYMid slice"/>
+  <rect width="${S}" height="${S}" fill="url(#fade)"/>
+  <rect width="${S}" height="${S}" fill="url(#wm)"/>
 </svg>`;
 }

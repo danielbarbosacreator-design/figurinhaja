@@ -21,10 +21,21 @@ import { storage } from "@/lib/storage";
 import { dataUrlToRef, candidatePhotoRef, type ImageRef } from "./refs";
 
 const BASE = process.env.KIE_BASE_URL || "https://api.kie.ai";
-const MODEL = process.env.FLUX_MODEL || "flux-kontext-pro"; // ou flux-kontext-max
+// Qualidade máxima por padrão: flux-kontext-max adere melhor ao prompt e ao
+// rosto da referência. FLUX_MODEL=flux-kontext-pro volta pro mais barato/rápido.
+const MODEL = process.env.FLUX_MODEL || "flux-kontext-max";
 const GEN = `${BASE}/api/v1/flux/kontext/generate`;
 const INFO = `${BASE}/api/v1/flux/kontext/record-info`;
 const POLL_TIMEOUT_MS = 120_000;
+
+// Passo de upscale (Recraft Crisp Upscale via Kie "market"): 1024 -> 2048/4096,
+// remove ruído e limpa os contornos. Liga por padrão; FLUX_UPSCALE=0 desliga.
+// FLUX_UPSCALE_MODEL troca o upscaler; se o passo falhar, cai na imagem base.
+const UPSCALE_ON = process.env.FLUX_UPSCALE !== "0";
+const UPSCALE_MODEL = process.env.FLUX_UPSCALE_MODEL || "recraft/crisp-upscale";
+const JOBS_CREATE = `${BASE}/api/v1/jobs/createTask`;
+const JOBS_INFO = `${BASE}/api/v1/jobs/recordInfo`;
+const UPSCALE_TIMEOUT_MS = 90_000;
 
 function apiKey(): string {
   const k = process.env.KIE_API_KEY || process.env.BFL_API_KEY;
@@ -62,17 +73,36 @@ async function uploadTemp(ref: ImageRef): Promise<string> {
   return url;
 }
 
-/** ≤125 chars, PT (Kie traduz com enableTranslation). */
+// Termos de qualidade colados em todo prompt (PT; Kie traduz com enableTranslation).
+const QUALITY =
+  "altíssima qualidade, altíssima resolução, ultra detalhado, foco nítido, " +
+  "traços limpos, iluminação de estúdio, cores vivas e saturadas, sem borrões, " +
+  "sem artefatos, sem texto extra, sem marca d'água";
+
+/** Prompt PT rico. FLUX aceita prompts longos — sem corte agressivo de 125. */
 function promptFor(req: GenerationRequest, caption: string | null): string {
   const name = req.candidate.name;
-  const t = caption ? ` texto "${caption}"` : "";
+  const t = caption
+    ? ` Balão/faixa com o texto "${caption}" em letras grandes, legível, bem posicionado.`
+    : "";
+  let base: string;
   if (req.flowType === "user_photo") {
-    return `Foto realista: esta pessoa ao lado de ${name}, selfie sorrindo, luz natural, mesmo rosto.${t}`.slice(0, 125);
+    base =
+      `Foto ultrarrealista em alta resolução: esta pessoa ao lado de ${name}, ` +
+      `selfie sorrindo, luz natural suave, pele com textura real, olhos nítidos, ` +
+      `preservar fielmente o rosto das duas pessoas, enquadramento de retrato.${t}`;
+  } else if (req.flowType === "user_candidate_pack") {
+    base =
+      `Figurinha sticker premium: esta pessoa e ${name} lado a lado sorrindo, ` +
+      `estilo ilustração vetorial limpa, contorno branco grosso de adesivo, ` +
+      `fundo simples e chapado, preservar fielmente os dois rostos.${t}`;
+  } else {
+    base =
+      `Figurinha sticker premium de ${name}, retrato do peito para cima, ` +
+      `sorrindo, estilo ilustração vetorial limpa e moderna, contorno branco ` +
+      `grosso de adesivo, fundo simples e chapado, preservar fielmente o rosto.${t}`;
   }
-  if (req.flowType === "user_candidate_pack") {
-    return `Figurinha sticker: esta pessoa e ${name} lado a lado sorrindo, contorno branco, mesmo rosto.${t}`.slice(0, 125);
-  }
-  return `Figurinha sticker de ${name}, contorno branco grosso, fundo simples, mesmo rosto, sorrindo.${t}`.slice(0, 125);
+  return `${base} ${QUALITY}`.slice(0, 800);
 }
 
 async function submit(
@@ -87,6 +117,8 @@ async function submit(
     aspectRatio,
     outputFormat: "png",
     enableTranslation: true,
+    // Enriquece o prompt no lado do FLUX antes de gerar — mais detalhe e nitidez.
+    promptUpsampling: true,
     safetyTolerance: inputImage ? 2 : 2,
   };
   if (inputImage) body.inputImage = inputImage;
@@ -124,6 +156,48 @@ async function poll(key: string, taskId: string): Promise<string> {
   throw new Error("Kie: tempo esgotado.");
 }
 
+/**
+ * Passo de upscale via Kie "market" (createTask + recordInfo). Best-effort:
+ * qualquer erro/timeout devolve `null` e o chamador fica com a imagem base.
+ */
+async function upscale(key: string, imageUrl: string): Promise<string | null> {
+  try {
+    const res = await fetch(JOBS_CREATE, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model: UPSCALE_MODEL, input: { image: imageUrl } }),
+    });
+    const j = (await res.json().catch(() => ({}))) as {
+      code?: number;
+      data?: { taskId?: string };
+    };
+    const taskId = j.data?.taskId;
+    if (!res.ok || j.code !== 200 || !taskId) return null;
+
+    const deadline = Date.now() + UPSCALE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const p = await fetch(`${JOBS_INFO}?taskId=${encodeURIComponent(taskId)}`, {
+        headers: { authorization: `Bearer ${key}` },
+      });
+      const pj = (await p.json().catch(() => ({}))) as {
+        data?: { state?: string; resultJson?: string };
+      };
+      const state = pj.data?.state;
+      if (state === "success") {
+        const parsed = JSON.parse(pj.data?.resultJson || "{}") as {
+          resultUrls?: string[];
+        };
+        return parsed.resultUrls?.[0] ?? null;
+      }
+      if (state === "fail") return null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function generateOne(
   key: string,
   req: GenerationRequest,
@@ -133,7 +207,10 @@ async function generateOne(
 ): Promise<GeneratedItem> {
   const aspect = req.flowType === "user_photo" ? "3:4" : "1:1";
   const taskId = await submit(key, promptFor(req, caption), inputImage, aspect);
-  const resultUrl = await poll(key, taskId);
+  const baseUrl = await poll(key, taskId);
+
+  // Sobe a resolução e limpa os contornos; se falhar, segue com a base.
+  const resultUrl = (UPSCALE_ON && (await upscale(key, baseUrl))) || baseUrl;
 
   const img = await fetch(resultUrl);
   if (!img.ok) throw new Error(`Kie download ${img.status}`);
