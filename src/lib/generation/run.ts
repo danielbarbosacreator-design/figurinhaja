@@ -9,7 +9,7 @@
  */
 import type { Generation, Asset, CandidateRef, FlowType } from "@/types";
 import { db } from "@/lib/db/memory";
-import { imageGenerator } from "./index";
+import { imageGenerator, type GeneratedItem } from "./index";
 
 export interface StartGenerationInput {
   sessionId: string;
@@ -43,6 +43,10 @@ export function startGeneration(input: StartGenerationInput): Generation {
       g.status = "failed";
       g.error = err instanceof Error ? err.message : "erro desconhecido";
     }
+    // Limpa assets parciais de uma geração que acabou falhando.
+    for (const [aid, a] of db.assets) {
+      if (a.generationId === id) db.assets.delete(aid);
+    }
   });
 
   return generation;
@@ -52,17 +56,7 @@ async function runToCompletion(
   generation: Generation,
   input: StartGenerationInput,
 ): Promise<void> {
-  const result = await imageGenerator.generate({
-    generationId: generation.id,
-    flowType: input.flowType,
-    candidate: input.candidate,
-    quantity: input.quantity,
-    customText: input.customText,
-    userPhoto: input.userPhoto,
-    candidatePhoto: input.candidatePhoto,
-  });
-
-  for (const item of result.items) {
+  const persist = (item: GeneratedItem): void => {
     const asset: Asset = {
       id: crypto.randomUUID(),
       generationId: generation.id,
@@ -73,6 +67,30 @@ async function runToCompletion(
       meta: item.meta,
     };
     db.assets.set(asset.id, asset);
+  };
+
+  // Persiste cada figurinha assim que fica pronta (a tela de progresso lê
+  // `assets.length` e anda de verdade). O `generate` ainda devolve tudo no
+  // fim — se um provedor não chamar o callback, o fallback abaixo cobre.
+  const streamed = new Set<GeneratedItem>();
+  const result = await imageGenerator.generate(
+    {
+      generationId: generation.id,
+      flowType: input.flowType,
+      candidate: input.candidate,
+      quantity: input.quantity,
+      customText: input.customText,
+      userPhoto: input.userPhoto,
+      candidatePhoto: input.candidatePhoto,
+    },
+    (item) => {
+      streamed.add(item);
+      persist(item);
+    },
+  );
+
+  for (const item of result.items) {
+    if (!streamed.has(item)) persist(item);
   }
 
   const g = db.generations.get(generation.id);

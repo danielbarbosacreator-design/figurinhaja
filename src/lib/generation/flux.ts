@@ -55,10 +55,18 @@ const UPLOAD_URL =
 
 const POLL_TIMEOUT_MS = 180_000;
 const UPSCALE_TIMEOUT_MS = 90_000;
+// Kie processa vários jobs em paralelo. Quanto maior, menos lotes sequenciais
+// (pack de 20 em 4 lotes em vez de 7). KIE_CONCURRENCY ajusta.
+const CONCURRENCY = Math.max(
+  1,
+  Math.min(12, Number(process.env.KIE_CONCURRENCY) || 6),
+);
 
 // Passo de upscale (Recraft Crisp Upscale via Kie "jobs"): 1024 -> 2048/4096,
-// remove ruído e limpa contornos. Liga por padrão; FLUX_UPSCALE=0 desliga.
-const UPSCALE_ON = process.env.FLUX_UPSCALE !== "0";
+// remove ruído e limpa contornos, mas DOBRA o tempo total (um job extra por
+// figurinha). Desligado por padrão — o nano-banana já sai nítido. FLUX_UPSCALE=1
+// religa quando a nitidez extra vale a espera.
+const UPSCALE_ON = process.env.FLUX_UPSCALE === "1";
 const UPSCALE_MODEL = process.env.FLUX_UPSCALE_MODEL || "recraft/crisp-upscale";
 
 function apiKey(): string {
@@ -195,7 +203,7 @@ async function fluxSubmit(
 async function fluxPoll(key: string, taskId: string): Promise<string> {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 2000));
     const res = await fetch(
       `${FLUX_INFO}?taskId=${encodeURIComponent(taskId)}`,
       { headers: { authorization: `Bearer ${key}` } },
@@ -243,7 +251,7 @@ async function jobsPoll(
 ): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 2000));
     const res = await fetch(
       `${JOBS_INFO}?taskId=${encodeURIComponent(taskId)}`,
       { headers: { authorization: `Bearer ${key}` } },
@@ -398,7 +406,10 @@ async function resolveRefs(
 
 export const fluxGenerator: ImageGenerator = {
   name: "kie",
-  async generate(req: GenerationRequest): Promise<GenerationResult> {
+  async generate(
+    req: GenerationRequest,
+    onItem?: (item: GeneratedItem) => void,
+  ): Promise<GenerationResult> {
     const key = apiKey();
 
     const { urls: refUrls, slots: refSlots, warnings } = await resolveRefs(
@@ -423,9 +434,9 @@ export const fluxGenerator: ImageGenerator = {
     const items: GeneratedItem[] = [];
     const errors: string[] = [];
 
-    for (let i = 0; i < req.quantity; i += 3) {
+    for (let i = 0; i < req.quantity; i += CONCURRENCY) {
       const batch = Array.from(
-        { length: Math.min(3, req.quantity - i) },
+        { length: Math.min(CONCURRENCY, req.quantity - i) },
         (_, k) => i + k,
       );
       const settled = await Promise.allSettled(
@@ -434,11 +445,14 @@ export const fluxGenerator: ImageGenerator = {
         ),
       );
       for (const r of settled) {
-        if (r.status === "fulfilled") items.push(r.value);
-        else
+        if (r.status === "fulfilled") {
+          items.push(r.value);
+          onItem?.(r.value); // deixa a tela de progresso andar item a item
+        } else {
           errors.push(
             r.reason instanceof Error ? r.reason.message : String(r.reason),
           );
+        }
       }
     }
 

@@ -17,10 +17,18 @@ export default function GerandoPage() {
   const mounted = useMounted();
   const s = useWizard();
   const [phase, setPhase] = useState<Phase>("starting");
-  const [activeStep, setActiveStep] = useState(0);
-  const [progressPercent, setProgressPercent] = useState(18);
+  // `done`/`total`: progresso REAL — quantas figurinhas já ficaram prontas.
+  const [done, setDone] = useState(0);
+  const [total, setTotal] = useState(0);
+  // `displayPercent`: número que aparece na tela, sempre andando suavemente
+  // em direção ao alvo real (nunca "congela").
+  const [displayPercent, setDisplayPercent] = useState(6);
+  const [tipIndex, setTipIndex] = useState(0);
   const startedAt = useRef<number>(0);
   const kickedOff = useRef(false);
+  const finishing = useRef(false);
+  const doneRef = useRef(0);
+  const totalRef = useRef(0);
 
   const flow = s.flowType ? getFlow(s.flowType) : null;
   const missingBasics =
@@ -45,6 +53,21 @@ export default function GerandoPage() {
         "Criando figurinhas personalizadas",
         "Aplicando legendas e cortes de sticker",
         "Finalizando seu pack exclusivo",
+      ];
+
+  const tips = isPhoto
+    ? [
+        "Ajustando luz e enquadramento...",
+        "Cuidando dos detalhes do rosto...",
+        "Deixando tudo com cara de foto de verdade...",
+        "Quase lá — dando o acabamento final...",
+      ]
+    : [
+        "Desenhando os traços de cada figurinha...",
+        "Caprichando nas expressões...",
+        "Recortando no estilo sticker...",
+        "Separando as melhores variações...",
+        "Quase lá — finalizando o pack...",
       ];
 
   async function startGeneration() {
@@ -96,13 +119,24 @@ export default function GerandoPage() {
       const r = await fetch(`/api/generation/${s.generationId}`);
       if (!r.ok) return false;
       const d = await r.json();
+
+      if (typeof d.quantity === "number" && d.quantity > 0) {
+        setTotal(d.quantity);
+        totalRef.current = d.quantity;
+      }
+      if (Array.isArray(d.assets)) {
+        setDone(d.assets.length);
+        doneRef.current = d.assets.length;
+      }
+
       if (d.status === "completed") {
-        setProgressPercent(100);
+        finishing.current = true;
+        setDone(d.quantity ?? d.assets?.length ?? 0);
         track("generation_completed", {
           generationId: s.generationId,
           quantity: d.quantity,
         });
-        setTimeout(() => router.replace("/criar/preview"), 400);
+        setTimeout(() => router.replace("/criar/preview"), 650);
         return true;
       }
       if (d.status === "failed") {
@@ -110,15 +144,13 @@ export default function GerandoPage() {
         return true;
       }
       const elapsed = Date.now() - startedAt.current;
-      // Rede de segurança: nunca deixa a tela girando pra sempre no 94%.
-      // Geração real (FLUX Kontext max + upscale) leva ~30-90s por figurinha e
-      // um pack de 20 roda em lotes sequenciais — pode passar de 10 min. Só
-      // desiste depois disso.
+      // Rede de segurança: só desiste depois de MUITO tempo (um pack grande
+      // pode passar de 5 min). Antes disso a barra continua andando sozinha.
       if (elapsed > 720_000) {
         setPhase("failed");
         return true;
       }
-      if (elapsed > 22_000) setPhase("slow");
+      if (elapsed > 90_000) setPhase("slow");
       return false;
     },
     {
@@ -130,18 +162,48 @@ export default function GerandoPage() {
     },
   );
 
-  // Animação progressiva dos passos
+  const active = phase === "processing" || phase === "slow";
+
+  // Anima o número mostrado em direção a um alvo que só cresce — mistura o
+  // progresso concreto (figurinhas prontas) com um piso que sobe com o tempo.
+  // Assim a barra anda mesmo ENTRE os lotes da IA: nunca parece travada.
   useEffect(() => {
-    if (phase !== "processing" && phase !== "slow") return;
-    const interval = setInterval(() => {
-      setActiveStep((current) => {
-        const next = Math.min(current + 1, steps.length - 1);
-        setProgressPercent(Math.min(94, 25 + next * 18));
-        return next;
+    if (!active) return;
+    const id = setInterval(() => {
+      const t = totalRef.current;
+      const frac = t > 0 ? Math.min(1, doneRef.current / t) : 0;
+      const secs = (Date.now() - startedAt.current) / 1000;
+      const goal = finishing.current
+        ? 100
+        : Math.min(96, Math.max(10 + 86 * frac, Math.min(72, 12 + secs * 1.25)));
+      setDisplayPercent((cur) => {
+        if (goal - cur < 0.3) return Math.max(cur, goal);
+        return cur + Math.max(0.25, (goal - cur) * 0.12);
       });
-    }, 1500);
-    return () => clearInterval(interval);
-  }, [phase, steps.length]);
+    }, 50);
+    return () => clearInterval(id);
+  }, [active]);
+
+  // Frases curtas que vão trocando — reforça que algo está acontecendo.
+  useEffect(() => {
+    if (!active) return;
+    const id = setInterval(
+      () => setTipIndex((i) => (i + 1) % tips.length),
+      2600,
+    );
+    return () => clearInterval(id);
+  }, [active, tips.length]);
+
+  const progressPercent = Math.round(displayPercent);
+  // Passo aceso: acompanha o quanto já andou (com um mínimo pra não ficar
+  // tudo apagado nos primeiros segundos).
+  const activeStep =
+    progressPercent >= 100
+      ? steps.length - 1
+      : Math.min(
+          steps.length - 1,
+          Math.max(0, Math.floor((displayPercent / 100) * steps.length)),
+        );
 
   if (!mounted) return null;
 
@@ -214,6 +276,18 @@ export default function GerandoPage() {
     >
       <AppHeader />
 
+      <style>{`
+        @keyframes gerando-spin { to { transform: rotate(360deg); } }
+        @keyframes gerando-pulse {
+          0%, 100% { box-shadow: 0 0 0 0 rgba(109,40,217,0.35); }
+          50% { box-shadow: 0 0 0 7px rgba(109,40,217,0); }
+        }
+        @keyframes gerando-fade {
+          from { opacity: 0; transform: translateY(4px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+      `}</style>
+
       <main
         style={{
           flex: 1,
@@ -263,10 +337,36 @@ export default function GerandoPage() {
               strokeDasharray={301.6}
               strokeDashoffset={301.6 - (301.6 * progressPercent) / 100}
               style={{
-                transition: "stroke-dashoffset 0.6s cubic-bezier(0.4, 0, 0.2, 1)",
+                transition: "stroke-dashoffset 0.35s linear",
               }}
             />
           </svg>
+
+          {/* Arco que gira sem parar por cima — movimento constante mesmo
+              enquanto a barra real espera o próximo lote da IA. */}
+          {progressPercent < 100 && (
+            <svg
+              width="110"
+              height="110"
+              viewBox="0 0 110 110"
+              style={{
+                position: "absolute",
+                inset: 0,
+                animation: "gerando-spin 1s linear infinite",
+              }}
+            >
+              <circle
+                cx="55"
+                cy="55"
+                r="48"
+                fill="none"
+                stroke="#A855F7"
+                strokeWidth="7"
+                strokeLinecap="round"
+                strokeDasharray="20 281.6"
+              />
+            </svg>
+          )}
 
           {/* Porcentagem centralizada */}
           <div
@@ -381,8 +481,8 @@ export default function GerandoPage() {
                           ? "#6D28D9"
                           : "#F1F5F9",
                       color: isDone || isActive ? "#ffffff" : "#94A3B8",
-                      boxShadow: isActive
-                        ? "0 0 0 4px rgba(109,40,217, 0.15)"
+                      animation: isActive
+                        ? "gerando-pulse 1.5s ease-in-out infinite"
                         : "none",
                     }}
                   >
@@ -415,10 +515,35 @@ export default function GerandoPage() {
           </ul>
         </div>
 
-        {/* Mensagem de espera */}
+        {/* Frase que troca sozinha — sinal visível de que segue trabalhando */}
         <div
           style={{
-            marginTop: "20px",
+            marginTop: "18px",
+            minHeight: "20px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: "8px",
+            fontSize: "14px",
+            fontWeight: 600,
+            color: "#0F172A",
+            textAlign: "center",
+          }}
+        >
+          <span
+            key={tipIndex}
+            style={{ animation: "gerando-fade 0.4s ease" }}
+          >
+            {progressPercent >= 100
+              ? "Tudo pronto! Abrindo seus resultados..."
+              : tips[tipIndex]}
+          </span>
+        </div>
+
+        {/* Estimativa + andamento real */}
+        <div
+          style={{
+            marginTop: "8px",
             display: "flex",
             alignItems: "center",
             gap: "8px",
@@ -430,7 +555,11 @@ export default function GerandoPage() {
           <span>
             {phase === "slow"
               ? copy.errors.generationSlow
-              : "Leva cerca de 5 a 15 segundos..."}
+              : total > 1
+                ? done > 0
+                  ? `${done} de ${total} prontas...`
+                  : `Gerando ${total} imagens — costuma levar de 30s a 2 min...`
+                : "Costuma levar de 20 a 40 segundos..."}
           </span>
         </div>
       </main>

@@ -36,9 +36,19 @@ export interface GenerationResult {
   items: GeneratedItem[];
 }
 
+/**
+ * Chamado assim que CADA item fica pronto (antes de `generate` resolver).
+ * Deixa a rota persistir o asset na hora e a tela de progresso andar de
+ * verdade, item a item, em vez de pular de 0 a 100 no fim.
+ */
+export type OnItem = (item: GeneratedItem) => void;
+
 export interface ImageGenerator {
   name: string;
-  generate: (req: GenerationRequest) => Promise<GenerationResult>;
+  generate: (
+    req: GenerationRequest,
+    onItem?: OnItem,
+  ) => Promise<GenerationResult>;
 }
 
 function selectGenerator(): ImageGenerator {
