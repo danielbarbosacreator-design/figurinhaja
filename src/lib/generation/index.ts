@@ -10,7 +10,7 @@
 import type { CandidateRef, FlowType } from "@/types";
 import { mockGenerator } from "./mock";
 import { geminiGenerator } from "./gemini";
-import { fluxGenerator } from "./flux";
+import { kieGenerator } from "./flux";
 import { pollinationsGenerator } from "./pollinations";
 
 export interface GenerationRequest {
@@ -46,8 +46,9 @@ function selectGenerator(): ImageGenerator {
   switch (provider) {
     case "gemini":
       return geminiGenerator;
-    case "flux":
-      return fluxGenerator;
+    case "kie":
+    case "flux": // alias legado — hoje aponta para o gerador Kie multi-modelo
+      return kieGenerator;
     case "pollinations":
       // Grátis, sem chave — só para testar o pipeline (não preserva rosto).
       return pollinationsGenerator;
