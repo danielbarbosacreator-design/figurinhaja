@@ -1,22 +1,25 @@
 /**
- * Gerador real — Kie.ai (api.kie.ai), plataforma multi-modelo.
+ * Gerador real — Kie.ai (api.kie.ai).
  *
- * Liga com GENERATION_PROVIDER=kie (ou o alias legado `flux`) + KIE_API_KEY no
- * .env.local, junto de STORAGE_PROVIDER=memory até o Supabase (Fase 2). Roda SÓ
- * no servidor — a chave nunca vai ao cliente.
+ * Liga com GENERATION_PROVIDER=kie + KIE_API_KEY no .env.local, junto de
+ * STORAGE_PROVIDER=memory até o Supabase (Fase 2). Roda SÓ no servidor — a
+ * chave nunca vai ao cliente.
  *
- * A mesma KIE_API_KEY dá acesso a vários modelos. Escolha por KIE_MODEL:
- *  - google/nano-banana-edit  (PADRÃO) — Gemini 2.5 Flash Image ("nano-banana").
- *      Aceita VÁRIAS imagens de referência → dá para mandar o rosto do usuário
- *      E o do candidato no mesmo pedido. Rápido (~10-20s) e ótima fidelidade.
- *  - google/nano-banana       — mesma família, sem referência (texto→imagem).
- *      Usado automaticamente quando não há nenhuma foto de referência.
- *  - flux-kontext-max / flux-kontext-pro — FLUX.1 Kontext. Aceita só 1 imagem.
+ * O usuário final NUNCA escreve prompt nem escolhe modelo. Tudo é decidido
+ * aqui a partir do tipo de fluxo, do candidato, das fotos e da quantidade.
  *
- * As fotos chegam como data URL (cliente) ou de /public (candidato "featured").
- * Subimos cada uma para o próprio storage da Kie (file-base64-upload) e passamos
- * as URLs resultantes ao modelo — sem depender de host de terceiros (catbox/
- * tmpfiles, que quebravam e deixavam a geração "cega", sem ler a imagem).
+ * ── Roteamento de modelo (auditoria set/2026) ────────────────────────────
+ * Os 3 fluxos usam `flux-2/pro-image-to-image` (endpoint /api/v1/jobs):
+ *   - aceita 1–8 referências humanas (`input_urls`)  → fluxos com 2 pessoas OK
+ *   - saída FOTORREALISTA com boa preservação de identidade (testado)
+ *   - política permissiva com figura pública (não recusa como nano-banana/gpt)
+ * Comparado contra seedream-v4-edit (perde a 2ª identidade) e nano-banana-pro
+ * (ignora as referências). Cada fluxo tem override por env se precisar trocar.
+ *
+ * Figurinha (fluxos 1 e 2): primeiro gera a PESSOA fotográfica, depois
+ * `recraft/remove-background` recorta e deixa o fundo transparente. NÃO se
+ * pede "ilustração/cartoon" ao modelo — só o recorte é tratamento de sticker.
+ * Foto (fluxo 3): sem recorte, imagem fotográfica pura.
  */
 import type {
   ImageGenerator,
@@ -24,63 +27,41 @@ import type {
   GenerationResult,
   GeneratedItem,
 } from "./index";
+import sharp from "sharp";
 import { storage } from "@/lib/storage";
 import { dataUrlToRef, candidatePhotoRef, type ImageRef } from "./refs";
 
+type FlowType = GenerationRequest["flowType"];
+
 const BASE = process.env.KIE_BASE_URL || "https://api.kie.ai";
-
-// Modelo principal. KIE_MODEL troca sem mexer no código. Mantém FLUX_MODEL como
-// alias legado para não quebrar .env.local antigos.
-// Padrão: flux-kontext-pro. O nano-banana (google/nano-banana-edit) faz
-// figurinhas mais bonitas e com fundo transparente, MAS recusa com frequência
-// figura política ("flagged as sensitive") — o que travava a tela de geração.
-// KIE_MODEL=google/nano-banana-edit religa o nano-banana quando quiser testar.
-const MODEL =
-  process.env.KIE_MODEL || process.env.FLUX_MODEL || "flux-kontext-pro";
-// Quando não há referência nenhuma, nano-banana-edit não serve (exige imagem):
-// cai no modelo texto→imagem da mesma família.
-const TEXT_MODEL = process.env.KIE_TEXT_MODEL || "google/nano-banana";
-
-const isFlux = /^flux-kontext/.test(MODEL);
-
-// Endpoints FLUX Kontext (usados só quando KIE_MODEL=flux-kontext-*).
+const JOBS_CREATE = `${BASE}/api/v1/jobs/createTask`;
+const JOBS_INFO = `${BASE}/api/v1/jobs/recordInfo`;
+// Endpoints FLUX Kontext — só se algum override apontar para flux-kontext-*.
 const FLUX_GEN = `${BASE}/api/v1/flux/kontext/generate`;
 const FLUX_INFO = `${BASE}/api/v1/flux/kontext/record-info`;
 
-// Endpoints "jobs" — genéricos, servem nano-banana, upscale e a maioria dos
-// modelos do marketplace da Kie.
-const JOBS_CREATE = `${BASE}/api/v1/jobs/createTask`;
-const JOBS_INFO = `${BASE}/api/v1/jobs/recordInfo`;
-
-// Upload de referência para o storage da própria Kie (devolve URL pública).
 const UPLOAD_URL =
   process.env.KIE_UPLOAD_URL ||
   "https://kieai.redpandaai.co/api/file-base64-upload";
 
-const POLL_TIMEOUT_MS = 180_000;
-const UPSCALE_TIMEOUT_MS = 90_000;
-// Kie processa vários jobs em paralelo. Quanto maior, menos lotes sequenciais
-// (pack de 20 em 4 lotes em vez de 7). KIE_CONCURRENCY ajusta.
+const GEN_TIMEOUT_MS = 240_000;
+const BG_REMOVE_TIMEOUT_MS = 90_000;
+const POLL_INTERVAL_MS = 2500;
+
+// Quantas imagens do pack gerar em paralelo (a Kie processa vários jobs ao
+// mesmo tempo). Packs pequenos (≤ este número) disparam todas de uma vez.
 const CONCURRENCY = Math.max(
   1,
-  Math.min(12, Number(process.env.KIE_CONCURRENCY) || 6),
+  Math.min(12, Number(process.env.KIE_CONCURRENCY) || 8),
 );
 
-// Passo de upscale (Recraft Crisp Upscale via Kie "jobs"): 1024 -> 2048/4096,
-// remove ruído e limpa contornos, mas DOBRA o tempo total (um job extra por
-// figurinha). Desligado por padrão — o nano-banana já sai nítido. FLUX_UPSCALE=1
-// religa quando a nitidez extra vale a espera.
-const UPSCALE_ON = process.env.FLUX_UPSCALE === "1";
-const UPSCALE_MODEL = process.env.FLUX_UPSCALE_MODEL || "recraft/crisp-upscale";
-
-// Recorte de fundo (Recraft Remove Background via Kie "jobs") — deixa a
-// figurinha com fundo 100% transparente (PNG alfa). O FLUX Kontext nem sempre
-// entrega transparente sozinho; este passo garante. Só nos fluxos de figurinha,
-// nunca na foto realista. +~10-20s por figurinha. KIE_BG_REMOVE=0 desliga.
+// Recorte de fundo → figurinha 100% transparente. KIE_BG_REMOVE=0 desliga.
 const BG_REMOVE_ON = process.env.KIE_BG_REMOVE !== "0";
 const BG_REMOVE_MODEL =
   process.env.KIE_BG_REMOVE_MODEL || "recraft/remove-background";
-const BG_REMOVE_TIMEOUT_MS = 60_000;
+
+// Ajuste global de estilo, só para o admin (não há campo no app). Vazio = nada.
+const STYLE_EXTRA = (process.env.KIE_STYLE_EXTRA || "").trim();
 
 function apiKey(): string {
   const k = process.env.KIE_API_KEY || process.env.BFL_API_KEY;
@@ -92,10 +73,71 @@ function apiKey(): string {
   return k;
 }
 
-/**
- * Sobe uma referência (base64) para o storage da Kie e devolve a URL pública
- * que o modelo vai baixar. Sem hosts de terceiros no caminho.
- */
+/* ── Roteador de modelo ─────────────────────────────────────────────────── */
+
+interface FlowModel {
+  model: string;
+  /** aspect_ratio enviado ao modelo */
+  aspect: string;
+  resolution: "1K" | "2K";
+  /** recorta o fundo depois (figurinha) */
+  bgRemove: boolean;
+  /** nº de referências obrigatório para este fluxo */
+  minRefs: number;
+  maxRefs: number;
+}
+
+const DEFAULT_MODEL = "flux-2/pro-image-to-image";
+
+function envModel(name: string): string {
+  const v = (process.env[name] || "").trim();
+  return v || process.env.KIE_MODEL_OVERRIDE?.trim() || DEFAULT_MODEL;
+}
+
+function modelForFlow(flow: FlowType): FlowModel {
+  switch (flow) {
+    case "user_photo":
+      return {
+        model: envModel("KIE_MODEL_ME_CANDIDATE_PHOTO"),
+        aspect: "3:4",
+        resolution: "1K",
+        bgRemove: false,
+        minRefs: 2,
+        maxRefs: 2,
+      };
+    case "user_candidate_pack":
+      return {
+        model: envModel("KIE_MODEL_ME_CANDIDATE_STICKERS"),
+        aspect: "1:1",
+        resolution: "1K",
+        bgRemove: BG_REMOVE_ON,
+        minRefs: 2,
+        maxRefs: 2,
+      };
+    case "candidate_pack":
+    default:
+      return {
+        model: envModel("KIE_MODEL_CANDIDATE_STICKERS"),
+        aspect: "1:1",
+        resolution: "1K",
+        bgRemove: BG_REMOVE_ON,
+        minRefs: 1,
+        maxRefs: 1,
+      };
+  }
+}
+
+const isFluxKontext = (m: string) => /^flux-kontext/.test(m);
+
+/** Nome do campo de referências conforme a família do modelo. */
+function refField(model: string): "input_urls" | "image_urls" {
+  if (process.env.KIE_REF_FIELD === "image_urls") return "image_urls";
+  if (process.env.KIE_REF_FIELD === "input_urls") return "input_urls";
+  return /^flux-2\//.test(model) ? "input_urls" : "image_urls";
+}
+
+/* ── Upload das referências ─────────────────────────────────────────────── */
+
 async function uploadRef(key: string, ref: ImageRef): Promise<string> {
   const ext = ref.mimeType.includes("png")
     ? "png"
@@ -112,214 +154,201 @@ async function uploadRef(key: string, ref: ImageRef): Promise<string> {
     }),
   });
   const j = (await res.json().catch(() => ({}))) as {
-    success?: boolean;
-    code?: number;
     data?: { downloadUrl?: string };
   };
   const url = j.data?.downloadUrl;
   if (!res.ok || !url || !/^https?:\/\//.test(url)) {
     throw new Error(
-      `Kie upload: ${res.status} ${JSON.stringify(j).slice(0, 200)}`,
+      `upload da referência falhou (${res.status} ${JSON.stringify(j).slice(0, 160)})`,
     );
   }
   return url;
 }
 
 /**
- * O usuário final NUNCA escreve prompt. Tudo abaixo é montado automaticamente
- * a partir das escolhas da interface (tipo, candidato, quantidade, fotos).
+ * Resolve as referências do fluxo, na ORDEM certa (pessoa 1 = usuário,
+ * pessoa 2 = candidato) e sobe cada uma para a Kie.
  */
+async function resolveRefs(
+  key: string,
+  req: GenerationRequest,
+): Promise<{ urls: string[]; count: number }> {
+  const wanted: (ImageRef | null)[] = [];
 
-// Estilo padrão das figurinhas (fluxos "candidate_pack" e "user_candidate_pack").
-const STICKER_STYLE =
-  "Estilo: figurinha (sticker) premium para WhatsApp — ilustração vetorial " +
-  "limpa e moderna, contorno/borda branca grossa e uniforme por toda a " +
-  "silhueta, recorte limpo. FUNDO 100% TRANSPARENTE (PNG com canal alfa, " +
-  "nenhum pixel de fundo, sem cenário, sem cor de fundo, sem sombra no chão). " +
-  "Cores vivas, alta nitidez, personagem centralizado com margem de folga em " +
-  "volta, enquadramento do corpo inteiro ou da cintura para cima, iluminação " +
-  "uniforme, rosto bem definido, mãos corretas, aparência descontraída.";
+  if (req.flowType === "candidate_pack") {
+    wanted.push(
+      req.candidatePhoto
+        ? dataUrlToRef(req.candidatePhoto)
+        : req.candidate.isCustom
+          ? null
+          : await candidatePhotoRef(req.candidate.id),
+    );
+  } else {
+    // REFERÊNCIA 1 = usuário
+    wanted.push(req.userPhoto ? dataUrlToRef(req.userPhoto) : null);
+    // REFERÊNCIA 2 = candidato (sempre, para os dois fluxos de 2 pessoas)
+    wanted.push(
+      req.candidatePhoto
+        ? dataUrlToRef(req.candidatePhoto)
+        : req.candidate.isCustom
+          ? null
+          : await candidatePhotoRef(req.candidate.id),
+    );
+  }
 
-// Estilo do fluxo "user_photo" — foto realista, NUNCA figurinha.
-const PHOTO_STYLE =
-  "Estilo: fotografia realista e natural — parece uma foto de verdade tirada " +
-  "no celular, cenário realista e agradável, iluminação natural, foco nítido " +
-  "nos dois rostos, composição boa para redes sociais. SEM borda branca, SEM " +
-  "recorte de figurinha, SEM fundo transparente, SEM aparência de desenho ou " +
-  "ilustração.";
+  const urls: string[] = [];
+  for (const ref of wanted) {
+    if (!ref) continue;
+    urls.push(await uploadRef(key, ref));
+  }
+  return { urls, count: urls.length };
+}
 
-const NEGATIVE =
-  "Evite: rosto ou mãos deformados, dedos a mais ou a menos, olhos tortos, " +
-  "boca distorcida, óculos/chapéu/boné deformados, pessoas extras no fundo, " +
-  "rostos duplicados, mistura de identidades, membros ou acessórios cortados " +
-  "pela borda, baixa resolução, texto aleatório.";
+/* ── Prompt interno (fotorrealista) ─────────────────────────────────────── */
 
-// Ajuste global de estilo, só para o admin (não há campo no app). Vazio = nada.
-const STYLE_EXTRA = (process.env.KIE_STYLE_EXTRA || "").trim();
-
-/**
- * Biblioteca de variações automáticas — pose + expressão + acessório +
- * elemento. Cada imagem do pack pega uma entrada diferente para que 5 pedidas
- * saiam 5 DIFERENTES, não 5 quase iguais. As 5 primeiras seguem a ordem
- * preferida do briefing.
- */
-// Poses NEUTRAS de propósito: o nano-banana recusa figura política + carga
-// eleitoral (bandeira, punho cerrado, "comício", verde-e-amarelo). Aqui é um
-// pack de personalidade divertido, não de campanha — reduz muito a recusa.
 const POOL_CANDIDATE = [
-  "fazendo joinha com as duas mãos, sorriso largo",
-  "usando óculos escuros estilosos, braços cruzados, sorriso de canto",
-  "usando um chapéu de palha, acenando com a mão, expressão simpática",
+  "sorrindo e fazendo joinha com as duas mãos",
+  "usando óculos escuros, braços cruzados, sorriso de canto",
+  "usando um chapéu, acenando com a mão, expressão simpática",
   "usando boné, polegar para cima, expressão animada",
-  "fazendo coração com as mãos, expressão carinhosa e carismática",
-  "dando uma gargalhada espontânea, mão no peito, expressão divertida",
-  "apontando para a câmera com as duas mãos, sorriso divertido, piscando um olho",
-  "fazendo sinal de paz com a mão, sorriso tranquilo, cabeça levemente inclinada",
+  "fazendo coração com as mãos, expressão carinhosa",
+  "dando uma gargalhada espontânea, mão no peito",
+  "apontando para a câmera com as duas mãos, piscando um olho",
+  "fazendo sinal de paz com a mão, cabeça levemente inclinada",
   "com as duas mãos na cintura, pose confiante, sorrindo",
-  "mandando um beijo com a mão, expressão simpática e brincalhona",
-  "dando de ombros com um sorriso divertido, palmas das mãos para cima",
-  "com o polegar para cima e piscando um olho, pose de aprovação",
+  "mandando um beijo com a mão, expressão brincalhona",
+  "dando de ombros com um sorriso divertido",
+  "com o polegar para cima e piscando um olho",
 ];
 
-const POOL_USER_CANDIDATE = [
-  "os dois lado a lado tirando uma selfie juntos, sorrindo para a câmera, rostos próximos",
+const POOL_TWO = [
+  "os dois lado a lado tirando uma selfie, sorrindo para a câmera, rostos próximos",
   "os dois lado a lado fazendo joinha, sorrindo animados",
-  "a pessoa do usuário apontando para a pessoa ao lado, os dois rindo",
+  "a pessoa 1 apontando para a pessoa 2, os dois rindo",
   "os dois lado a lado, um com o braço sobre o ombro do outro, abraço amigável",
   "os dois fazendo sinal de paz, expressão descontraída",
-  "os dois lado a lado rindo juntos, clima de amigos de longa data",
+  "os dois lado a lado rindo juntos, clima de amigos",
   "os dois fazendo coração com as mãos, expressão simpática",
   "os dois lado a lado com os polegares para cima, sorrindo",
 ];
 
-const POOL_USER_PHOTO = [
-  "uma selfie natural dos dois juntos, sorrindo, tirada com o braço esticado",
-  "os dois lado a lado posando para uma foto casual, luz natural de dia",
-  "os dois de pé conversando e sorrindo, foto espontânea",
-  "os dois se cumprimentando com um aperto de mãos, foto de encontro amistoso",
+const POOL_PHOTO = [
+  "standing side by side, taking a casual friendly photo together, smiling at the camera",
+  "standing next to each other, one with an arm around the other's shoulder, both smiling",
+  "posing together for a photo, natural relaxed stance, daytime natural light",
+  "greeting each other with a friendly handshake, warm expressions",
 ];
 
-function poolFor(flow: GenerationRequest["flowType"]): string[] {
-  if (flow === "user_photo") return POOL_USER_PHOTO;
-  if (flow === "user_candidate_pack") return POOL_USER_CANDIDATE;
-  return POOL_CANDIDATE;
-}
-
-/** Variação automática do item `index` (0-based). Cicla o pool sem repetir cedo. */
-function variationFor(flow: GenerationRequest["flowType"], index: number): string {
-  const pool = poolFor(flow);
+function variationFor(flow: FlowType, index: number): string {
+  const pool =
+    flow === "user_photo"
+      ? POOL_PHOTO
+      : flow === "user_candidate_pack"
+        ? POOL_TWO
+        : POOL_CANDIDATE;
   const base = pool[index % pool.length];
-  // Passou do tamanho do pool: nudge de ângulo pra não sair idêntico.
   const lap = Math.floor(index / pool.length);
-  return lap === 0
-    ? base
-    : `${base}, com ângulo e enquadramento levemente diferentes`;
+  return lap === 0 ? base : `${base}, ângulo e enquadramento diferentes`;
 }
 
-/**
- * Monta o prompt interno. Curto e leve de propósito: prompt longo com muita
- * ênfase em "preservar identidade / não substituir rosto" em cima de uma
- * pessoa real dispara o filtro de conteúdo do modelo. Aqui é uma caricatura
- * divertida — nada de vocabulário político ("candidato", "eleitor", "comício").
- */
+const PHOTO_NEGATIVE =
+  "NO cartoon, NO illustration, NO caricature, NO vector, NO anime, NO 3D " +
+  "character, NO digital painting, NO sticker style, NO white sticker outline. " +
+  "Avoid deformed faces or hands, extra fingers, extra people, duplicated faces.";
+
 function promptFor(
   req: GenerationRequest,
   caption: string | null,
-  refCount: number,
   variation: string,
 ): string {
   const name = req.candidate.name;
-  const twoPeople = req.flowType !== "candidate_pack";
 
-  let subject: string;
-  if (twoPeople) {
-    subject =
-      `Duas pessoas juntas: a pessoa da 1ª foto e ${name}` +
-      (refCount >= 2 ? ` (2ª foto)` : ``) +
-      `. Mantenha cada rosto, cabelo e barba iguais aos da própria foto; ` +
-      `são duas pessoas distintas, não repita o mesmo rosto nas duas.`;
-  } else {
-    subject =
-      `${name}, sozinho. Mantenha rosto, cabelo, barba e traços marcantes ` +
-      `iguais aos da foto de referência, em estilo de caricatura simpática.`;
+  if (req.flowType === "user_photo") {
+    // Conceito fornecido pelo dono — foto realista de DUAS pessoas.
+    return [
+      "Create a highly photorealistic photograph featuring the two distinct " +
+        "people provided in the reference images together in the same scene.",
+      "REFERENCE IMAGE 1 represents PERSON 1 (a regular person). REFERENCE " +
+        `IMAGE 2 represents PERSON 2 (${name}).`,
+      "Preserve the facial identity, age, facial structure, hair, beard when " +
+        "applicable, skin characteristics and recognizable features of PERSON 1. " +
+        "Separately preserve the same for PERSON 2.",
+      "These are TWO DIFFERENT PEOPLE. Do not merge their identities. Do not " +
+        "copy one person's face onto the other. Do not replace either person. " +
+        "Do not create additional people.",
+      `Scene: ${variation}.`,
+      "The final image must look like an authentic photograph: natural skin " +
+        "texture, realistic hair, realistic hands, correct anatomy, natural " +
+        "lighting, realistic camera perspective, natural depth of field, sharp " +
+        "facial features.",
+      PHOTO_NEGATIVE,
+      "Facial identity preservation has higher priority than changing " +
+        "clothing, poses, accessories or scenery.",
+      STYLE_EXTRA,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .slice(0, 4500);
   }
 
-  const scene = twoPeople ? `${variation}.` : `${name} ${variation}.`;
-  const style = req.flowType === "user_photo" ? PHOTO_STYLE : STICKER_STYLE;
-  const legenda = caption
-    ? `Inclua o texto "${caption}" em uma faixa de adesivo, grande e legível, ` +
-      `sem cortar letras.`
-    : `Sem nenhum texto.`;
+  // Fluxos 1 e 2 — PESSOA FOTOGRÁFICA. O recorte de figurinha é feito depois.
+  const two = req.flowType === "user_candidate_pack";
+  const who = two
+    ? `two different real people together: PERSON 1 from reference image 1 (a ` +
+      `regular person) and PERSON 2 from reference image 2 (${name}). Keep each ` +
+      `face, hair and beard exactly like their own reference. They are two ` +
+      `distinct people — never repeat the same face on both.`
+    : `${name}, the exact person from the reference image. Keep the same face, ` +
+      `age, hair, beard and recognizable features as the reference.`;
 
-  return [subject, scene, style, legenda, NEGATIVE, STYLE_EXTRA]
+  const legenda = caption
+    ? `Add the short text "${caption}" as a small readable caption banner, ` +
+      `large legible letters, no cut-off letters.`
+    : "No text.";
+
+  return [
+    `A real, authentic photograph of ${who}`,
+    `Scene: ${variation}.`,
+    two
+      ? "Both people from the chest up, facing the camera."
+      : "From the chest up or waist up, facing the camera.",
+    "Plain neutral studio background, even photographic lighting, natural skin " +
+      "texture, realistic hands, sharp facial features, high detail.",
+    "This is a REAL PHOTOGRAPH of real people — the sticker look will be added " +
+      "later only as a cut-out. Do NOT convert the subject into an " +
+      "illustration, cartoon, caricature or drawing.",
+    "Present it as a die-cut photo sticker: the person is cut out with a thick " +
+      "solid white border around the silhouette, on a plain background.",
+    legenda,
+    PHOTO_NEGATIVE,
+    "Facial identity preservation is the top priority, above pose, clothing or " +
+      "accessories.",
+    STYLE_EXTRA,
+  ]
     .filter(Boolean)
     .join(" ")
-    .slice(0, 900);
+    .slice(0, 4500);
 }
 
-/* ── Submissão / polling: FLUX Kontext ─────────────────────────────────── */
-
-async function fluxSubmit(
-  key: string,
-  prompt: string,
-  inputImage: string | null,
-  aspectRatio: string,
-): Promise<string> {
-  const body: Record<string, unknown> = {
-    prompt,
-    model: MODEL,
-    aspectRatio,
-    outputFormat: "png",
-    enableTranslation: true,
-    promptUpsampling: true,
-    safetyTolerance: 2,
-  };
-  if (inputImage) body.inputImage = inputImage;
-
-  const res = await fetch(FLUX_GEN, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-    body: JSON.stringify(body),
-  });
-  const j = (await res.json().catch(() => ({}))) as {
-    code?: number;
-    msg?: string;
-    data?: { taskId?: string };
-  };
-  if (!res.ok || j.code !== 200 || !j.data?.taskId) {
-    throw new Error(
-      `Kie flux generate: ${res.status} ${j.msg ?? JSON.stringify(j).slice(0, 200)}`,
-    );
-  }
-  return j.data.taskId;
+function captionPlan(
+  quantity: number,
+  customText: string | null,
+): (string | null)[] {
+  const c =
+    customText && customText.trim() ? customText.trim().toUpperCase() : null;
+  return Array.from({ length: quantity }, (_, i) => (c && i % 2 === 0 ? c : null));
 }
 
-async function fluxPoll(key: string, taskId: string): Promise<string> {
-  const deadline = Date.now() + POLL_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 2000));
-    const res = await fetch(
-      `${FLUX_INFO}?taskId=${encodeURIComponent(taskId)}`,
-      { headers: { authorization: `Bearer ${key}` } },
-    );
-    const j = (await res.json().catch(() => ({}))) as {
-      data?: { successFlag?: number; response?: { resultImageUrl?: string } };
-    };
-    const flag = j.data?.successFlag;
-    if (flag === 1 && j.data?.response?.resultImageUrl)
-      return j.data.response.resultImageUrl;
-    if (flag === 2 || flag === 3) throw new Error("Kie flux: geração falhou.");
-  }
-  throw new Error("Kie flux: tempo esgotado.");
-}
+/* ── Chamadas à Kie ────────────────────────────────────────────────────── */
 
-/* ── Submissão / polling: jobs (nano-banana e afins) ───────────────────── */
+type Timings = { tCreated: number; tDone: number; costMs: number | null };
 
-async function jobsSubmit(
+async function jobsGenerate(
   key: string,
   model: string,
   input: Record<string, unknown>,
-): Promise<string> {
+  timeoutMs: number = GEN_TIMEOUT_MS,
+): Promise<{ url: string; t: Timings }> {
   const res = await fetch(JOBS_CREATE, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
@@ -332,185 +361,262 @@ async function jobsSubmit(
   };
   if (!res.ok || j.code !== 200 || !j.data?.taskId) {
     throw new Error(
-      `Kie jobs create (${model}): ${res.status} ${j.msg ?? JSON.stringify(j).slice(0, 200)}`,
+      `Kie createTask (${model}): ${res.status} ${j.msg ?? JSON.stringify(j).slice(0, 200)}`,
     );
   }
-  return j.data.taskId;
-}
-
-async function jobsPoll(
-  key: string,
-  taskId: string,
-  timeoutMs: number,
-): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
+  const tCreated = Date.now();
+  const taskId = j.data.taskId;
+  const deadline = tCreated + timeoutMs;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 2000));
-    const res = await fetch(
-      `${JOBS_INFO}?taskId=${encodeURIComponent(taskId)}`,
-      { headers: { authorization: `Bearer ${key}` } },
-    );
-    const j = (await res.json().catch(() => ({}))) as {
-      data?: { state?: string; resultJson?: string; failMsg?: string };
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    const p = await fetch(`${JOBS_INFO}?taskId=${encodeURIComponent(taskId)}`, {
+      headers: { authorization: `Bearer ${key}` },
+    });
+    const pj = (await p.json().catch(() => ({}))) as {
+      data?: {
+        state?: string;
+        resultJson?: string;
+        failCode?: string | null;
+        failMsg?: string | null;
+        costTime?: number | null;
+      };
     };
-    const state = j.data?.state;
-    if (state === "success") {
-      const parsed = JSON.parse(j.data?.resultJson || "{}") as {
+    const st = pj.data?.state;
+    if (st === "success") {
+      const parsed = JSON.parse(pj.data?.resultJson || "{}") as {
         resultUrls?: string[];
       };
       const url = parsed.resultUrls?.[0];
-      if (url) return url;
-      throw new Error("Kie jobs: sucesso sem resultUrls.");
+      if (!url) throw new Error(`Kie ${model}: success sem resultUrls`);
+      return {
+        url,
+        t: { tCreated, tDone: Date.now(), costMs: pj.data?.costTime ?? null },
+      };
     }
-    if (state === "fail")
-      throw new Error(`Kie jobs: ${j.data?.failMsg || "geração falhou."}`);
+    if (st === "fail") {
+      throw new Error(
+        `Kie ${model}: ${pj.data?.failCode || ""} ${pj.data?.failMsg || "geração falhou"}`.trim(),
+      );
+    }
   }
-  throw new Error("Kie jobs: tempo esgotado.");
+  throw new Error(`Kie ${model}: tempo esgotado`);
 }
 
-/** Upscale best-effort: qualquer erro/timeout devolve `null` e fica a base. */
-async function upscale(key: string, imageUrl: string): Promise<string | null> {
+/** FLUX Kontext (1 imagem) — só usado se um override apontar para flux-kontext-*. */
+async function fluxKontextGenerate(
+  key: string,
+  model: string,
+  prompt: string,
+  inputImage: string | null,
+  aspectRatio: string,
+): Promise<{ url: string; t: Timings }> {
+  const res = await fetch(FLUX_GEN, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+    body: JSON.stringify({
+      prompt,
+      model,
+      aspectRatio,
+      outputFormat: "png",
+      enableTranslation: true,
+      ...(inputImage ? { inputImage } : {}),
+    }),
+  });
+  const j = (await res.json().catch(() => ({}))) as {
+    code?: number;
+    msg?: string;
+    data?: { taskId?: string };
+  };
+  if (!res.ok || j.code !== 200 || !j.data?.taskId) {
+    throw new Error(
+      `Kie flux generate: ${res.status} ${j.msg ?? JSON.stringify(j).slice(0, 200)}`,
+    );
+  }
+  const tCreated = Date.now();
+  const taskId = j.data.taskId;
+  const deadline = tCreated + GEN_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    const p = await fetch(`${FLUX_INFO}?taskId=${encodeURIComponent(taskId)}`, {
+      headers: { authorization: `Bearer ${key}` },
+    });
+    const pj = (await p.json().catch(() => ({}))) as {
+      data?: { successFlag?: number; response?: { resultImageUrl?: string } };
+    };
+    const flag = pj.data?.successFlag;
+    if (flag === 1 && pj.data?.response?.resultImageUrl)
+      return {
+        url: pj.data.response.resultImageUrl,
+        t: { tCreated, tDone: Date.now(), costMs: null },
+      };
+    if (flag === 2 || flag === 3)
+      throw new Error("Kie flux: geração falhou (successFlag 2/3)");
+  }
+  throw new Error("Kie flux: tempo esgotado");
+}
+
+// Borda branca de adesivo — largura relativa ao tamanho da imagem.
+const STICKER_BORDER_ON = process.env.KIE_STICKER_BORDER !== "0";
+
+/**
+ * Recorte já veio transparente do `recraft/remove-background`. Aqui, no
+ * servidor (sharp, rápido), adicionamos a BORDA BRANCA grossa e uniforme da
+ * figurinha: dilata a silhueta, pinta de branco, e recoloca o recorte por cima.
+ */
+async function addStickerBorder(png: Buffer): Promise<Buffer> {
   try {
-    const taskId = await jobsSubmit(key, UPSCALE_MODEL, { image: imageUrl });
-    return await jobsPoll(key, taskId, UPSCALE_TIMEOUT_MS);
-  } catch {
-    return null;
+    const base = sharp(png).ensureAlpha();
+    const meta = await base.metadata();
+    const w = meta.width ?? 1024;
+    const h = meta.height ?? 1024;
+    const borderPx = Math.max(8, Math.round(Math.min(w, h) * 0.022));
+
+    // Máscara dilatada: alpha -> blur -> threshold baixo = silhueta expandida.
+    const dilated = await sharp(png)
+      .ensureAlpha()
+      .extractChannel("alpha")
+      .blur(borderPx / 2)
+      .threshold(24)
+      .toColourspace("b-w")
+      .png()
+      .toBuffer();
+
+    const whiteRGB = await sharp({
+      create: { width: w, height: h, channels: 3, background: "#ffffff" },
+    })
+      .png()
+      .toBuffer();
+
+    const whiteShape = await sharp(whiteRGB)
+      .joinChannel(dilated)
+      .png()
+      .toBuffer();
+
+    return await sharp(whiteShape)
+      .composite([{ input: await base.png().toBuffer() }])
+      .png({ compressionLevel: 9 })
+      .toBuffer();
+  } catch (err) {
+    log("sticker_border_fallback", {
+      msg: err instanceof Error ? err.message : String(err),
+    });
+    return png;
   }
 }
 
-/** Recorte de fundo best-effort: erro/timeout devolve a URL original. */
 async function removeBackground(key: string, imageUrl: string): Promise<string> {
   try {
-    const taskId = await jobsSubmit(key, BG_REMOVE_MODEL, { image: imageUrl });
-    return await jobsPoll(key, taskId, BG_REMOVE_TIMEOUT_MS);
-  } catch (err) {
-    console.warn(
-      `[kie] remoção de fundo falhou, mantendo original: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+    const { url } = await jobsGenerate(
+      key,
+      BG_REMOVE_MODEL,
+      { image: imageUrl },
+      BG_REMOVE_TIMEOUT_MS,
     );
+    return url;
+  } catch (err) {
+    log("bg_remove_fallback", {
+      msg: err instanceof Error ? err.message : String(err),
+    });
     return imageUrl;
   }
 }
 
+/* ── Classificação de erro (fallback por tipo) ─────────────────────────── */
+
+type ErrKind = "policy" | "transient" | "unknown";
+
+function classifyError(msg: string): ErrKind {
+  if (/sensitive|flagged|content polic|policy violation|violat|moderation|safety|not allowed/i.test(msg))
+    return "policy";
+  if (/tempo esgotado|timeout|ETIMEDOUT|ECONNRESET|ENOTFOUND|network|fetch failed|socket|502|503|504|429|sem resultUrls/i.test(msg))
+    return "transient";
+  return "unknown";
+}
+
+/* ── Logs estruturados (sem segredos) ──────────────────────────────────── */
+
+function log(event: string, data: Record<string, unknown>): void {
+  try {
+    console.log(`[gen] ${JSON.stringify({ event, ts: Date.now(), ...data })}`);
+  } catch {
+    /* nunca quebra a geração por causa de log */
+  }
+}
+
+/* ── Geração de um item ────────────────────────────────────────────────── */
+
 async function generateOne(
   key: string,
   req: GenerationRequest,
+  cfg: FlowModel,
   caption: string | null,
   refUrls: string[],
   variation: string,
   variant: number,
 ): Promise<GeneratedItem> {
-  const portrait = req.flowType === "user_photo";
-  const aspect = portrait ? "3:4" : "1:1";
-  const prompt = promptFor(req, caption, refUrls.length, variation);
+  const prompt = promptFor(req, caption, variation);
+  const tStart = Date.now();
 
-  let baseUrl: string;
-  if (isFlux) {
-    const taskId = await fluxSubmit(key, prompt, refUrls[0] ?? null, aspect);
-    baseUrl = await fluxPoll(key, taskId);
-  } else if (refUrls.length) {
-    const taskId = await jobsSubmit(key, MODEL, {
+  let genUrl: string;
+  let t: Timings;
+  if (isFluxKontext(cfg.model)) {
+    ({ url: genUrl, t } = await fluxKontextGenerate(
+      key,
+      cfg.model,
       prompt,
-      image_urls: refUrls,
-      output_format: "png",
-      image_size: aspect,
-    });
-    baseUrl = await jobsPoll(key, taskId, POLL_TIMEOUT_MS);
+      refUrls[0] ?? null,
+      cfg.aspect,
+    ));
   } else {
-    const taskId = await jobsSubmit(key, TEXT_MODEL, {
+    const input: Record<string, unknown> = {
+      [refField(cfg.model)]: refUrls,
       prompt,
-      output_format: "png",
-      image_size: aspect,
-    });
-    baseUrl = await jobsPoll(key, taskId, POLL_TIMEOUT_MS);
+      aspect_ratio: cfg.aspect,
+    };
+    if (/^flux-2\//.test(cfg.model)) input.resolution = cfg.resolution;
+    ({ url: genUrl, t } = await jobsGenerate(key, cfg.model, input));
   }
 
-  const upscaledUrl = (UPSCALE_ON && (await upscale(key, baseUrl))) || baseUrl;
+  const providerMs = t.tDone - t.tCreated;
+  const isSticker = cfg.bgRemove && req.flowType !== "user_photo";
 
-  // Figurinha: garante fundo transparente. Foto realista: nunca recorta.
-  const resultUrl =
-    BG_REMOVE_ON && req.flowType !== "user_photo"
-      ? await removeBackground(key, upscaledUrl)
-      : upscaledUrl;
+  // Figurinha: recorta o fundo (Kie) e depois adiciona a borda branca (sharp).
+  const finalUrl = isSticker ? await removeBackground(key, genUrl) : genUrl;
 
-  const img = await fetch(resultUrl);
-  if (!img.ok) throw new Error(`Kie download ${img.status}`);
-  const buf = await img.arrayBuffer();
-  const mime = img.headers.get("content-type")?.split(";")[0] || "image/png";
+  const img = await fetch(finalUrl);
+  if (!img.ok) throw new Error(`download do resultado falhou (${img.status})`);
+  let bytes: Buffer = Buffer.from(await img.arrayBuffer());
+  let mime = img.headers.get("content-type")?.split(";")[0] || "image/png";
 
-  const storeKey = await storage.putOriginal(buf, mime);
+  if (isSticker && STICKER_BORDER_ON) {
+    bytes = Buffer.from(await addStickerBorder(bytes));
+    mime = "image/png";
+  }
+
+  const ab = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+  const storeKey = await storage.putOriginal(ab, mime);
   const previewPath = storeKey.startsWith("mem:")
     ? `/api/blob/${storeKey.slice(4)}?preview=1`
     : storeKey;
+
+  log("item_ok", {
+    generationId: req.generationId,
+    flow: req.flowType,
+    model: cfg.model,
+    variant,
+    providerMs,
+    bgRemove: cfg.bgRemove && req.flowType !== "user_photo",
+    totalMs: Date.now() - tStart,
+    costMs: t.costMs,
+  });
+
   return { previewPath, originalPath: storeKey, meta: { variant, caption } };
 }
 
-/**
- * Legendas. Regra do briefing: NUNCA inventar texto. Só entra a frase que o
- * usuário digitou (uma só, no app), distribuída em ~metade das imagens para o
- * pack ter variedade (umas com frase, outras limpas).
- */
-function captionPlan(
-  quantity: number,
-  customText: string | null,
-): (string | null)[] {
-  const c = customText && customText.trim() ? customText.trim().toUpperCase() : null;
-  return Array.from({ length: quantity }, (_, i) => (c && i % 2 === 0 ? c : null));
-}
-
-/**
- * Resolve as referências disponíveis para o fluxo e sobe cada uma para a Kie.
- * Devolve as URLs e a descrição de cada slot (ordem importa no multi-imagem).
- */
-async function resolveRefs(
-  key: string,
-  req: GenerationRequest,
-): Promise<{ urls: string[]; slots: string[]; warnings: string[] }> {
-  const wanted: { ref: ImageRef | null; slot: string }[] = [];
-
-  if (req.flowType === "candidate_pack") {
-    const ref = req.candidatePhoto
-      ? dataUrlToRef(req.candidatePhoto)
-      : req.candidate.isCustom
-        ? null
-        : await candidatePhotoRef(req.candidate.id);
-    wanted.push({ ref, slot: `rosto de ${req.candidate.name}` });
-  } else {
-    const userRef = req.userPhoto ? dataUrlToRef(req.userPhoto) : null;
-    wanted.push({ ref: userRef, slot: "rosto do usuário" });
-
-    // Segunda referência: rosto do candidato (multi-imagem). FLUX Kontext
-    // ignora a partir da 2ª, então só vale para nano-banana e afins.
-    if (!isFlux) {
-      const candRef = req.candidatePhoto
-        ? dataUrlToRef(req.candidatePhoto)
-        : req.candidate.isCustom
-          ? null
-          : await candidatePhotoRef(req.candidate.id);
-      if (candRef)
-        wanted.push({ ref: candRef, slot: `rosto de ${req.candidate.name}` });
-    }
-  }
-
-  const urls: string[] = [];
-  const slots: string[] = [];
-  const warnings: string[] = [];
-  for (const w of wanted) {
-    if (!w.ref) continue;
-    try {
-      urls.push(await uploadRef(key, w.ref));
-      slots.push(w.slot);
-    } catch (err) {
-      warnings.push(
-        `falha ao subir referência (${w.slot}): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-  }
-  return { urls, slots, warnings };
-}
+/* ── Orquestração ──────────────────────────────────────────────────────── */
 
 export const fluxGenerator: ImageGenerator = {
   name: "kie",
@@ -519,41 +625,71 @@ export const fluxGenerator: ImageGenerator = {
     onItem?: (item: GeneratedItem) => void,
   ): Promise<GenerationResult> {
     const key = apiKey();
+    const cfg = modelForFlow(req.flowType);
+    const t0 = Date.now();
 
-    const { urls: refUrls, warnings } = await resolveRefs(key, req);
-    for (const w of warnings) console.warn(`[kie] ${w}`);
-
-    // Fluxos que dependem da foto do usuário não podem gerar "às cegas":
-    // sem a referência o rosto seria inventado. Falha explícita > silêncio.
-    const needsUserRef =
-      req.flowType === "user_photo" || req.flowType === "user_candidate_pack";
-    if (needsUserRef && refUrls.length === 0) {
+    // Referências — resolve e sobe. Fluxos de 2 pessoas EXIGEM 2.
+    let refUrls: string[];
+    try {
+      ({ urls: refUrls } = await resolveRefs(key, req));
+    } catch (err) {
+      log("refs_error", {
+        generationId: req.generationId,
+        flow: req.flowType,
+        msg: err instanceof Error ? err.message : String(err),
+      });
       throw new Error(
-        `Não consegui enviar sua foto para a geração${
-          warnings[0] ? ` (${warnings[0]})` : ""
-        }. Tente de novo em instantes.`,
+        "Não consegui preparar as fotos de referência. Tente de novo em instantes.",
       );
     }
 
-    const caps = captionPlan(req.quantity, req.customText);
-    // Mapa índice -> item pronto. O usuário pediu N; entregamos N.
-    const done = new Map<number, GeneratedItem>();
-    const errors: string[] = [];
+    log("start", {
+      generationId: req.generationId,
+      flow: req.flowType,
+      model: cfg.model,
+      endpoint: isFluxKontext(cfg.model) ? "flux/kontext" : "jobs/createTask",
+      candidateId: req.candidate.id,
+      candidateCustom: req.candidate.isCustom,
+      referenceCount: refUrls.length,
+      quantity: req.quantity,
+      aspect: cfg.aspect,
+      bgRemove: cfg.bgRemove,
+    });
 
-    // Round 0 = tentativa normal. Round 1 = re-tenta o que faltou com uma
-    // variação neutra e simples (menos chance de recusa). Só 1 retry para não
-    // deixar a tela girando minutos.
-    const MAX_ROUNDS = 2;
-    for (let round = 0; round < MAX_ROUNDS; round++) {
-      const pending = Array.from({ length: req.quantity }, (_, i) => i).filter(
-        (i) => !done.has(i),
+    if (refUrls.length < cfg.minRefs) {
+      const falta =
+        req.flowType === "candidate_pack"
+          ? "a foto do candidato"
+          : refUrls.length === 0
+            ? "a sua foto e a do candidato"
+            : "a foto do candidato";
+      throw new Error(
+        `Este fluxo precisa de ${cfg.minRefs} foto(s) de referência e só tenho ${refUrls.length} (falta ${falta}). Geração não iniciada.`,
       );
+    }
+    const refs = refUrls.slice(0, cfg.maxRefs);
+
+    const caps = captionPlan(req.quantity, req.customText);
+    const done = new Map<number, GeneratedItem>();
+    const failures: { idx: number; kind: ErrKind; msg: string }[] = [];
+
+    // Round 0 = todas as N em paralelo (em lotes de CONCURRENCY).
+    // Round 1 = re-tenta SÓ o que falhou por motivo transitório/desconhecido.
+    for (let round = 0; round < 2; round++) {
+      const pending =
+        round === 0
+          ? Array.from({ length: req.quantity }, (_, i) => i)
+          : failures
+              .filter((f) => f.kind !== "policy")
+              .map((f) => f.idx)
+              .filter((i) => !done.has(i));
       if (pending.length === 0) break;
       if (round > 0) {
-        console.warn(
-          `[kie] round ${round}: re-tentando ${pending.length} item(ns)`,
-        );
-        await new Promise((r) => setTimeout(r, 1000));
+        log("retry_round", {
+          generationId: req.generationId,
+          retrying: pending.length,
+        });
+        failures.length = 0;
       }
 
       for (let i = 0; i < pending.length; i += CONCURRENCY) {
@@ -563,47 +699,72 @@ export const fluxGenerator: ImageGenerator = {
             generateOne(
               key,
               req,
+              cfg,
               caps[idx],
-              refUrls,
+              refs,
               round === 0
                 ? variationFor(req.flowType, idx)
-                : "retrato simpático, sorrindo, olhando para a câmera",
+                : variationFor(req.flowType, idx + req.quantity),
               (idx % 6) + 1,
             ).then((item) => ({ idx, item })),
           ),
         );
-        for (const r of settled) {
+        for (let k = 0; k < settled.length; k++) {
+          const r = settled[k];
+          const idx = batch[k];
           if (r.status === "fulfilled") {
-            done.set(r.value.idx, r.value.item);
-            onItem?.(r.value.item); // progresso anda item a item
+            done.set(idx, r.value.item);
+            onItem?.(r.value.item);
           } else {
-            errors.push(
-              r.reason instanceof Error ? r.reason.message : String(r.reason),
-            );
-            console.warn(
-              `[kie] item falhou: ${
-                r.reason instanceof Error ? r.reason.message : String(r.reason)
-              }`,
-            );
+            const msg =
+              r.reason instanceof Error ? r.reason.message : String(r.reason);
+            const kind = classifyError(msg);
+            failures.push({ idx, kind, msg });
+            log("item_fail", {
+              generationId: req.generationId,
+              flow: req.flowType,
+              model: cfg.model,
+              idx,
+              kind,
+              providerMessage: msg.slice(0, 300),
+            });
           }
         }
       }
     }
 
-    if (done.size === 0)
-      throw new Error(errors[0] ?? "Falha na geração (Kie).");
-    if (done.size < req.quantity) {
+    const totalMs = Date.now() - t0;
+    log("end", {
+      generationId: req.generationId,
+      flow: req.flowType,
+      model: cfg.model,
+      requested: req.quantity,
+      completed: done.size,
+      failed: req.quantity - done.size,
+      totalMs,
+    });
+
+    if (done.size === 0) {
+      const anyPolicy = failures.some((f) => f.kind === "policy");
       throw new Error(
-        `Geramos ${done.size} de ${req.quantity} imagens. ` +
-          `Tente novamente — você não será cobrado.`,
+        anyPolicy
+          ? "O modelo recusou gerar as imagens por política de conteúdo. Tente outro candidato ou outra foto."
+          : failures[0]?.msg || "Falha na geração (Kie).",
+      );
+    }
+    if (done.size < req.quantity) {
+      const anyPolicy = failures.some((f) => f.kind === "policy");
+      throw new Error(
+        anyPolicy
+          ? `Geramos ${done.size} de ${req.quantity} — o modelo recusou o restante por política de conteúdo. Você não será cobrado.`
+          : `Geramos ${done.size} de ${req.quantity} imagens. Tente novamente — você não será cobrado.`,
       );
     }
 
-    // Devolve na ordem dos índices (1..N), legendas/poses batendo com o plano.
     const items = Array.from({ length: req.quantity }, (_, i) => done.get(i)!);
     return { items };
   },
 };
 
-/** Alias explícito — `import { kieGenerator }`. */
+/** Alias explícito. */
 export const kieGenerator = fluxGenerator;
