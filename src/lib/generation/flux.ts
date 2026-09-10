@@ -55,6 +55,10 @@ const CONCURRENCY = Math.max(
   Math.min(12, Number(process.env.KIE_CONCURRENCY) || 8),
 );
 
+// Resolução do flux-2 (1K = 5 créditos, 2K = 7). 2K ajuda a fidelidade do
+// rosto. KIE_RESOLUTION=1K baixa para economizar.
+const RES: "1K" | "2K" = process.env.KIE_RESOLUTION === "1K" ? "1K" : "2K";
+
 // Recorte de fundo → figurinha 100% transparente. KIE_BG_REMOVE=0 desliga.
 const BG_REMOVE_ON = process.env.KIE_BG_REMOVE !== "0";
 const BG_REMOVE_MODEL =
@@ -100,7 +104,7 @@ function modelForFlow(flow: FlowType): FlowModel {
       return {
         model: envModel("KIE_MODEL_ME_CANDIDATE_PHOTO"),
         aspect: "3:4",
-        resolution: "1K",
+        resolution: RES,
         bgRemove: false,
         minRefs: 2,
         maxRefs: 2,
@@ -109,7 +113,7 @@ function modelForFlow(flow: FlowType): FlowModel {
       return {
         model: envModel("KIE_MODEL_ME_CANDIDATE_STICKERS"),
         aspect: "1:1",
-        resolution: "1K",
+        resolution: RES,
         bgRemove: BG_REMOVE_ON,
         minRefs: 2,
         maxRefs: 2,
@@ -119,7 +123,7 @@ function modelForFlow(flow: FlowType): FlowModel {
       return {
         model: envModel("KIE_MODEL_CANDIDATE_STICKERS"),
         aspect: "1:1",
-        resolution: "1K",
+        resolution: RES,
         bgRemove: BG_REMOVE_ON,
         minRefs: 1,
         maxRefs: 1,
@@ -256,11 +260,7 @@ const PHOTO_NEGATIVE =
   "character, NO digital painting, NO sticker style, NO white sticker outline. " +
   "Avoid deformed faces or hands, extra fingers, extra people, duplicated faces.";
 
-function promptFor(
-  req: GenerationRequest,
-  caption: string | null,
-  variation: string,
-): string {
+function promptFor(req: GenerationRequest, variation: string): string {
   const name = req.candidate.name;
 
   if (req.flowType === "user_photo") {
@@ -292,34 +292,38 @@ function promptFor(
   }
 
   // Fluxos 1 e 2 — PESSOA FOTOGRÁFICA. O recorte de figurinha é feito depois.
+  // Sem citar o nome: força o modelo a copiar os PIXELS da referência em vez
+  // do seu conceito interno (fraco) da pessoa pública.
   const two = req.flowType === "user_candidate_pack";
   const who = two
-    ? `two different real people together: PERSON 1 from reference image 1 (a ` +
-      `regular person) and PERSON 2 from reference image 2 (${name}). Keep each ` +
-      `face, hair and beard exactly like their own reference. They are two ` +
-      `distinct people — never repeat the same face on both.`
-    : `${name}, the exact person from the reference image. Keep the same face, ` +
-      `age, hair, beard and recognizable features as the reference.`;
+    ? `two different real people together: PERSON 1 is the exact person shown ` +
+      `in reference image 1, PERSON 2 is the exact person shown in reference ` +
+      `image 2. They are two distinct people — never put the same face on both.`
+    : `the exact person shown in the reference image`;
 
-  const legenda = caption
-    ? `Add the short text "${caption}" as a small readable caption banner, ` +
-      `large legible letters, no cut-off letters.`
-    : "No text.";
+  const identity = two
+    ? `Each face must precisely match its own reference image — same facial ` +
+      `structure, eyes, nose, mouth, beard or facial hair, hairline, age and ` +
+      `skin. Do not blend the two people.`
+    : `The result must be immediately recognizable as the SAME person as the ` +
+      `reference: match the facial structure, eyes, nose, mouth, beard or ` +
+      `facial hair, hairline, age and skin precisely.`;
 
   return [
-    `A real, authentic photograph of ${who}`,
+    `A real, authentic photograph of ${who}.`,
+    identity,
     `Scene: ${variation}.`,
     two
       ? "Both people from the chest up, facing the camera."
       : "From the chest up or waist up, facing the camera.",
     "Plain neutral studio background, even photographic lighting, natural skin " +
       "texture, realistic hands, sharp facial features, high detail.",
-    "This is a REAL PHOTOGRAPH of real people — the sticker look will be added " +
+    "This is a REAL PHOTOGRAPH of a real person — the sticker look is added " +
       "later only as a cut-out. Do NOT convert the subject into an " +
       "illustration, cartoon, caricature or drawing.",
-    "Present it as a die-cut photo sticker: the person is cut out with a thick " +
-      "solid white border around the silhouette, on a plain background.",
-    legenda,
+    "Leave clear empty space around the person and at the bottom of the frame; " +
+      "do not crop the head or hands. Do NOT add any text, caption, banner or " +
+      "lettering — text is added later.",
     PHOTO_NEGATIVE,
     "Facial identity preservation is the top priority, above pose, clothing or " +
       "accessories.",
@@ -455,49 +459,154 @@ async function fluxKontextGenerate(
   throw new Error("Kie flux: tempo esgotado");
 }
 
-// Borda branca de adesivo — largura relativa ao tamanho da imagem.
+/* ── Pós-processo da figurinha (borda branca + legenda meme) ───────────── */
+
 const STICKER_BORDER_ON = process.env.KIE_STICKER_BORDER !== "0";
+const STICKER_CAPTION_ON = process.env.KIE_STICKER_CAPTION !== "0";
+
+// Fontes "meme" — cada figurinha do pack pega uma diferente. São fontes de
+// sistema (macOS/Linux); se alguma faltar, o resvg cai na próxima da lista.
+const MEME_FONTS = [
+  "Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif",
+  "'Arial Black', Arial, sans-serif",
+  "'Comic Sans MS', 'Chalkboard SE', cursive",
+  "'Chalkboard SE', 'Comic Sans MS', sans-serif",
+  "'Marker Felt', 'Comic Sans MS', fantasy",
+  "Futura, 'Trebuchet MS', sans-serif",
+  "Georgia, 'Times New Roman', serif",
+  "Helvetica, Arial, sans-serif",
+];
+
+function escapeXml(s: string): string {
+  return s.replace(/[<>&'"]/g, (c) =>
+    c === "<"
+      ? "&lt;"
+      : c === ">"
+        ? "&gt;"
+        : c === "&"
+          ? "&amp;"
+          : c === "'"
+            ? "&apos;"
+            : "&quot;",
+  );
+}
 
 /**
- * Recorte já veio transparente do `recraft/remove-background`. Aqui, no
- * servidor (sharp, rápido), adicionamos a BORDA BRANCA grossa e uniforme da
- * figurinha: dilata a silhueta, pinta de branco, e recoloca o recorte por cima.
+ * Dilata a silhueta de forma CRISPA (sem glow): endurece o alpha, espalha com
+ * blur e re-endurece com threshold alto. O resultado é a máscara da borda.
  */
-async function addStickerBorder(png: Buffer): Promise<Buffer> {
+/**
+ * Silhueta expandida em ~`px` (contorno de adesivo), uniforme em toda a volta.
+ * alpha binário -> blur -> threshold baixo. Devolve 1 canal RAW (0/255).
+ */
+async function dilateSilhouette(
+  alphaChannel: Buffer,
+  w: number,
+  h: number,
+  px: number,
+): Promise<Buffer> {
+  return sharp(alphaChannel, { raw: { width: w, height: h, channels: 1 } })
+    .threshold(128) // silhueta binária limpa
+    .blur(Math.max(0.5, px * 0.6))
+    .threshold(48) // corta o blur: expande ~px, contorno uniforme
+    .extractChannel(0)
+    .toColourspace("b-w")
+    .raw()
+    .toBuffer();
+}
+
+/**
+ * Recorte já veio transparente do `recraft/remove-background`.
+ * 1) borda branca grossa e uniforme (crispDilate)
+ * 2) legenda meme (fonte diferente por figurinha, branco com contorno preto)
+ */
+async function stickerize(
+  png: Buffer,
+  caption: string | null,
+  index: number,
+): Promise<Buffer> {
   try {
-    const base = sharp(png).ensureAlpha();
-    const meta = await base.metadata();
+    const meta = await sharp(png).metadata();
     const w = meta.width ?? 1024;
     const h = meta.height ?? 1024;
-    const borderPx = Math.max(8, Math.round(Math.min(w, h) * 0.022));
+    const borderPx = Math.max(10, Math.round(Math.min(w, h) * 0.03));
 
-    // Máscara dilatada: alpha -> blur -> threshold baixo = silhueta expandida.
-    const dilated = await sharp(png)
-      .ensureAlpha()
-      .extractChannel("alpha")
-      .blur(borderPx / 2)
-      .threshold(24)
-      .toColourspace("b-w")
-      .png()
-      .toBuffer();
+    // Afasta o recorte das 4 bordas do quadro: onde o sujeito encostava no
+    // limite, ele é puxado pra dentro -> o contorno branco sempre fecha em
+    // volta, sem "prateleira" reta de branco colada na borda.
+    const inset = STICKER_BORDER_ON ? borderPx + 4 : 0;
+    const baseBuf = inset
+      ? await sharp(png)
+          .ensureAlpha()
+          .composite([
+            {
+              input: Buffer.from(
+                `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">` +
+                  `<rect x="${inset}" y="${inset}" width="${w - 2 * inset}" ` +
+                  `height="${h - 2 * inset}" rx="${Math.round(inset / 2)}" fill="#fff"/></svg>`,
+              ),
+              blend: "dest-in",
+            },
+          ])
+          .png()
+          .toBuffer()
+      : await sharp(png).ensureAlpha().png().toBuffer();
 
-    const whiteRGB = await sharp({
-      create: { width: w, height: h, channels: 3, background: "#ffffff" },
-    })
-      .png()
-      .toBuffer();
+    let out = baseBuf;
 
-    const whiteShape = await sharp(whiteRGB)
-      .joinChannel(dilated)
-      .png()
-      .toBuffer();
+    if (STICKER_BORDER_ON) {
+      const alpha = await sharp(baseBuf)
+        .ensureAlpha()
+        .extractChannel("alpha")
+        .raw()
+        .toBuffer();
+      const dilated = await dilateSilhouette(alpha, w, h, borderPx);
+      const whiteRGB = await sharp({
+        create: { width: w, height: h, channels: 3, background: "#ffffff" },
+      })
+        .png()
+        .toBuffer();
+      const whiteShape = await sharp(whiteRGB)
+        .joinChannel(dilated, { raw: { width: w, height: h, channels: 1 } })
+        .png()
+        .toBuffer();
+      out = await sharp(whiteShape)
+        .composite([{ input: baseBuf }])
+        .png()
+        .toBuffer();
+    }
 
-    return await sharp(whiteShape)
-      .composite([{ input: await base.png().toBuffer() }])
-      .png({ compressionLevel: 9 })
-      .toBuffer();
+    if (STICKER_CAPTION_ON && caption && caption.trim()) {
+      const txt = escapeXml(caption.trim().toUpperCase());
+      const font = MEME_FONTS[index % MEME_FONTS.length];
+      // largura de fonte que cabe na figurinha, com teto de altura.
+      const size = Math.min(
+        Math.round(h * 0.12),
+        Math.round((w * 0.82) / Math.max(3, txt.length) / 0.62),
+      );
+      const stroke = Math.max(3, Math.round(size * 0.16));
+      const rot = (index % 2 === 0 ? -1 : 1) * (2 + (index % 3));
+      const cx = w / 2;
+      // sobe o texto do fundo para as descidas não serem cortadas pela moldura.
+      const cy = h - Math.round(h * 0.14);
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">
+        <g transform="rotate(${rot} ${cx} ${cy})">
+          <text x="${cx}" y="${cy}" text-anchor="middle"
+            font-family="${font}" font-size="${size}" font-weight="900"
+            fill="#ffffff" stroke="#111111" stroke-width="${stroke}"
+            paint-order="stroke" stroke-linejoin="round"
+            style="letter-spacing:1px">${txt}</text>
+        </g>
+      </svg>`;
+      out = await sharp(out)
+        .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
+        .png()
+        .toBuffer();
+    }
+
+    return await sharp(out).png({ compressionLevel: 9 }).toBuffer();
   } catch (err) {
-    log("sticker_border_fallback", {
+    log("stickerize_fallback", {
       msg: err instanceof Error ? err.message : String(err),
     });
     return png;
@@ -554,7 +663,7 @@ async function generateOne(
   variation: string,
   variant: number,
 ): Promise<GeneratedItem> {
-  const prompt = promptFor(req, caption, variation);
+  const prompt = promptFor(req, variation);
   const tStart = Date.now();
 
   let genUrl: string;
@@ -580,7 +689,7 @@ async function generateOne(
   const providerMs = t.tDone - t.tCreated;
   const isSticker = cfg.bgRemove && req.flowType !== "user_photo";
 
-  // Figurinha: recorta o fundo (Kie) e depois adiciona a borda branca (sharp).
+  // Figurinha: recorta o fundo (Kie) → borda branca + legenda meme (sharp).
   const finalUrl = isSticker ? await removeBackground(key, genUrl) : genUrl;
 
   const img = await fetch(finalUrl);
@@ -588,8 +697,8 @@ async function generateOne(
   let bytes: Buffer = Buffer.from(await img.arrayBuffer());
   let mime = img.headers.get("content-type")?.split(";")[0] || "image/png";
 
-  if (isSticker && STICKER_BORDER_ON) {
-    bytes = Buffer.from(await addStickerBorder(bytes));
+  if (isSticker) {
+    bytes = Buffer.from(await stickerize(bytes, caption, variant - 1));
     mime = "image/png";
   }
 
