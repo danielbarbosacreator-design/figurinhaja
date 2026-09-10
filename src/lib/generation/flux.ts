@@ -112,55 +112,151 @@ async function uploadRef(key: string, ref: ImageRef): Promise<string> {
   return url;
 }
 
-// Termos de qualidade colados em todo prompt (PT; a Kie traduz internamente).
-const QUALITY =
-  "altíssima qualidade, altíssima resolução, ultra detalhado, foco nítido, " +
-  "traços limpos, iluminação de estúdio, cores vivas e saturadas, sem borrões, " +
-  "sem artefatos, sem texto extra indevido, sem marca d'água";
+/**
+ * O usuário final NUNCA escreve prompt. Tudo abaixo é montado automaticamente
+ * a partir das escolhas da interface (tipo, candidato, quantidade, fotos).
+ */
+
+// Estilo padrão das figurinhas (fluxos "candidate_pack" e "user_candidate_pack").
+const STICKER_STYLE =
+  "Estilo: figurinha (sticker) premium para WhatsApp — ilustração vetorial " +
+  "limpa e moderna, contorno/borda branca grossa e uniforme por toda a " +
+  "silhueta, recorte limpo, FUNDO TOTALMENTE TRANSPARENTE (sem cenário, sem " +
+  "fundo colorido, sem sombra projetada), formato PNG, cores vivas, alta " +
+  "nitidez, personagem centralizado com margem de folga em volta, " +
+  "enquadramento do corpo inteiro ou da cintura para cima, iluminação boa e " +
+  "uniforme, rosto bem definido, mãos corretas, aparência descontraída e " +
+  "simpática.";
+
+// Estilo do fluxo "user_photo" — foto realista, NUNCA figurinha.
+const PHOTO_STYLE =
+  "Estilo: fotografia realista e natural — parece uma foto de verdade tirada " +
+  "no celular, cenário realista e agradável, iluminação natural, foco nítido " +
+  "nos dois rostos, composição boa para redes sociais. SEM borda branca, SEM " +
+  "recorte de figurinha, SEM fundo transparente, SEM aparência de desenho ou " +
+  "ilustração.";
+
+const NEGATIVE =
+  "Evite: rosto ou mãos deformados, dedos a mais ou a menos, olhos tortos, " +
+  "boca distorcida, óculos/chapéu/boné deformados, pessoas extras no fundo, " +
+  "rostos duplicados, mistura de identidades, membros ou acessórios cortados " +
+  "pela borda, baixa resolução, texto aleatório.";
+
+// Ajuste global de estilo, só para o admin (não há campo no app). Vazio = nada.
+const STYLE_EXTRA = (process.env.KIE_STYLE_EXTRA || "").trim();
 
 /**
- * Monta o prompt. `refSlots` descreve, em ordem, o que cada imagem de
- * referência contém — o modelo multi-imagem usa essa ordem.
+ * Biblioteca de variações automáticas — pose + expressão + acessório +
+ * elemento. Cada imagem do pack pega uma entrada diferente para que 5 pedidas
+ * saiam 5 DIFERENTES, não 5 quase iguais. As 5 primeiras seguem a ordem
+ * preferida do briefing.
+ */
+// Poses NEUTRAS de propósito: o nano-banana recusa figura política + carga
+// eleitoral (bandeira, punho cerrado, "comício", verde-e-amarelo). Aqui é um
+// pack de personalidade divertido, não de campanha — reduz muito a recusa.
+const POOL_CANDIDATE = [
+  "fazendo joinha com as duas mãos, sorriso largo",
+  "usando óculos escuros estilosos, braços cruzados, sorriso de canto",
+  "usando um chapéu de palha, acenando com a mão, expressão simpática",
+  "usando boné, polegar para cima, expressão animada",
+  "fazendo coração com as mãos, expressão carinhosa e carismática",
+  "dando uma gargalhada espontânea, mão no peito, expressão divertida",
+  "apontando para a câmera com as duas mãos, sorriso divertido, piscando um olho",
+  "fazendo sinal de paz com a mão, sorriso tranquilo, cabeça levemente inclinada",
+  "com as duas mãos na cintura, pose confiante, sorrindo",
+  "mandando um beijo com a mão, expressão simpática e brincalhona",
+  "dando de ombros com um sorriso divertido, palmas das mãos para cima",
+  "com o polegar para cima e piscando um olho, pose de aprovação",
+];
+
+const POOL_USER_CANDIDATE = [
+  "os dois lado a lado tirando uma selfie juntos, sorrindo para a câmera, rostos próximos",
+  "os dois lado a lado fazendo joinha, sorrindo animados",
+  "a pessoa do usuário apontando para o candidato ao lado, os dois rindo",
+  "os dois lado a lado, o candidato com o braço sobre o ombro da pessoa do usuário, abraço amigável",
+  "os dois fazendo sinal de paz, expressão descontraída",
+  "os dois lado a lado rindo juntos, clima de amigos de longa data",
+  "os dois fazendo coração com as mãos, expressão simpática",
+  "os dois lado a lado com os polegares para cima, sorrindo",
+];
+
+const POOL_USER_PHOTO = [
+  "uma selfie natural dos dois juntos, sorrindo, tirada com o braço esticado",
+  "os dois lado a lado posando para uma foto casual, luz natural de dia",
+  "os dois de pé conversando e sorrindo, foto espontânea",
+  "os dois se cumprimentando com um aperto de mãos, foto de encontro amistoso",
+];
+
+function poolFor(flow: GenerationRequest["flowType"]): string[] {
+  if (flow === "user_photo") return POOL_USER_PHOTO;
+  if (flow === "user_candidate_pack") return POOL_USER_CANDIDATE;
+  return POOL_CANDIDATE;
+}
+
+/** Variação automática do item `index` (0-based). Cicla o pool sem repetir cedo. */
+function variationFor(flow: GenerationRequest["flowType"], index: number): string {
+  const pool = poolFor(flow);
+  const base = pool[index % pool.length];
+  // Passou do tamanho do pool: nudge de ângulo pra não sair idêntico.
+  const lap = Math.floor(index / pool.length);
+  return lap === 0
+    ? base
+    : `${base}, com ângulo e enquadramento levemente diferentes`;
+}
+
+/**
+ * Monta o prompt interno. Ordem de prioridade embutida (briefing):
+ * 1º identidade facial · 2º duas identidades distintas · 3º anatomia ·
+ * 4º pose automática · 5º acessórios · 6º estilo.
  */
 function promptFor(
   req: GenerationRequest,
   caption: string | null,
-  refSlots: string[],
+  refCount: number,
+  variation: string,
 ): string {
   const name = req.candidate.name;
-  const t = caption
-    ? ` Inclua um balão/faixa com o texto "${caption}" em letras grandes, ` +
-      `legível e bem posicionado.`
-    : "";
-  const refNote = refSlots.length
-    ? ` Referências, nesta ordem: ${refSlots
-        .map((s, i) => `${i + 1}) ${s}`)
-        .join("; ")}. Preserve fielmente cada rosto indicado.${
-        refSlots.length >= 2
-          ? " São pessoas DIFERENTES: não misture nem repita os rostos; " +
-            "cada figura mantém o rosto da sua própria referência."
-          : ""
-      }`
-    : "";
+  const twoPeople = req.flowType !== "candidate_pack";
 
-  let base: string;
-  if (req.flowType === "user_photo") {
-    base =
-      `Foto ultrarrealista em alta resolução: a pessoa da referência ao lado ` +
-      `de ${name}, selfie sorrindo, luz natural suave, pele com textura real, ` +
-      `olhos nítidos, enquadramento de retrato vertical.${t}`;
-  } else if (req.flowType === "user_candidate_pack") {
-    base =
-      `Figurinha sticker premium: a pessoa da referência e ${name} lado a lado ` +
-      `sorrindo, estilo ilustração vetorial limpa, contorno branco grosso de ` +
-      `adesivo, fundo simples e chapado.${t}`;
+  let identity: string;
+  if (twoPeople) {
+    identity =
+      `Duas pessoas DIFERENTES e reconhecíveis juntas: a pessoa da 1ª foto de ` +
+      `referência (o usuário) e ${name}` +
+      (refCount >= 2
+        ? ` (2ª foto de referência)`
+        : ` (mantenha a semelhança real de ${name})`) +
+      `. Preserve com fidelidade o rosto de CADA uma, separadamente. Nunca use ` +
+      `o mesmo rosto nas duas, não funda nem troque os rostos, não substitua ` +
+      `nenhuma delas e não crie uma terceira pessoa.`;
   } else {
-    base =
-      `Figurinha sticker premium de ${name}, do peito para cima, sorrindo, ` +
-      `estilo ilustração vetorial limpa e moderna, contorno branco grosso de ` +
-      `adesivo, fundo simples e chapado.${t}`;
+    identity =
+      `${name}, sozinho, sem nenhuma outra pessoa na imagem. Preserve com ` +
+      `fidelidade o rosto e a identidade de ${name} a partir da(s) foto(s) de ` +
+      `referência — o rosto é consistente mesmo mudando roupa, acessório e pose.`;
   }
-  return `${base}${refNote} ${QUALITY}`.slice(0, 1200);
+
+  const scene = twoPeople
+    ? `Cena: ${variation}.`
+    : `Cena: ${name} ${variation}.`;
+
+  const style = req.flowType === "user_photo" ? PHOTO_STYLE : STICKER_STYLE;
+
+  const legenda = caption
+    ? `Inclua o texto "${caption}" em uma faixa/balão de adesivo, letras ` +
+      `grandes e 100% legíveis, sem cortar nem distorcer as letras.`
+    : `Não inclua nenhum texto, letra ou marca d'água.`;
+
+  const priority =
+    `Prioridade: a identidade facial correta vem acima de qualquer acessório ` +
+    `ou pose — nunca sacrifique o rosto para cumprir um gesto. Anatomia ` +
+    `correta (mãos, dedos, olhos, boca). Nada cortado: cabeça, mãos, chapéu e ` +
+    `boné sempre inteiros dentro do quadro.`;
+
+  return [identity, scene, style, legenda, priority, NEGATIVE, STYLE_EXTRA]
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, 1600);
 }
 
 /* ── Submissão / polling: FLUX Kontext ─────────────────────────────────── */
@@ -289,12 +385,12 @@ async function generateOne(
   req: GenerationRequest,
   caption: string | null,
   refUrls: string[],
-  refSlots: string[],
+  variation: string,
   variant: number,
 ): Promise<GeneratedItem> {
   const portrait = req.flowType === "user_photo";
   const aspect = portrait ? "3:4" : "1:1";
-  const prompt = promptFor(req, caption, refSlots);
+  const prompt = promptFor(req, caption, refUrls.length, variation);
 
   let baseUrl: string;
   if (isFlux) {
@@ -331,24 +427,17 @@ async function generateOne(
   return { previewPath, originalPath: storeKey, meta: { variant, caption } };
 }
 
+/**
+ * Legendas. Regra do briefing: NUNCA inventar texto. Só entra a frase que o
+ * usuário digitou (uma só, no app), distribuída em ~metade das imagens para o
+ * pack ter variedade (umas com frase, outras limpas).
+ */
 function captionPlan(
-  flowType: GenerationRequest["flowType"],
   quantity: number,
   customText: string | null,
 ): (string | null)[] {
-  // Foto realista: nunca inventa legenda — só usa a frase se o usuário pediu.
-  if (flowType === "user_photo") {
-    const c = customText ? customText.toUpperCase() : null;
-    return Array.from({ length: quantity }, () => c);
-  }
-  const base = ["TAMO JUNTO", "É NÓIS", "PRA CIMA", "CONFIA", "FORÇA", "VAMO"];
-  const out: (string | null)[] = [];
-  for (let i = 0; i < quantity; i++) {
-    if (customText && i % 3 === 0) out.push(customText.toUpperCase());
-    else if (i % 4 === 3) out.push(null);
-    else out.push(base[i % base.length]);
-  }
-  return out;
+  const c = customText && customText.trim() ? customText.trim().toUpperCase() : null;
+  return Array.from({ length: quantity }, (_, i) => (c && i % 2 === 0 ? c : null));
 }
 
 /**
@@ -412,10 +501,7 @@ export const fluxGenerator: ImageGenerator = {
   ): Promise<GenerationResult> {
     const key = apiKey();
 
-    const { urls: refUrls, slots: refSlots, warnings } = await resolveRefs(
-      key,
-      req,
-    );
+    const { urls: refUrls, warnings } = await resolveRefs(key, req);
     for (const w of warnings) console.warn(`[kie] ${w}`);
 
     // Fluxos que dependem da foto do usuário não podem gerar "às cegas":
@@ -430,34 +516,70 @@ export const fluxGenerator: ImageGenerator = {
       );
     }
 
-    const caps = captionPlan(req.flowType, req.quantity, req.customText);
-    const items: GeneratedItem[] = [];
+    const caps = captionPlan(req.quantity, req.customText);
+    // Mapa índice -> item pronto. O usuário pediu N; entregamos N.
+    const done = new Map<number, GeneratedItem>();
     const errors: string[] = [];
 
-    for (let i = 0; i < req.quantity; i += CONCURRENCY) {
-      const batch = Array.from(
-        { length: Math.min(CONCURRENCY, req.quantity - i) },
-        (_, k) => i + k,
+    // Round 0 = tentativa normal; rounds seguintes só re-tentam o que faltou,
+    // com uma variação diferente (o modelo às vezes recusa uma pose/acessório).
+    const MAX_ROUNDS = 3;
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      const pending = Array.from({ length: req.quantity }, (_, i) => i).filter(
+        (i) => !done.has(i),
       );
-      const settled = await Promise.allSettled(
-        batch.map((idx) =>
-          generateOne(key, req, caps[idx], refUrls, refSlots, (idx % 6) + 1),
-        ),
-      );
-      for (const r of settled) {
-        if (r.status === "fulfilled") {
-          items.push(r.value);
-          onItem?.(r.value); // deixa a tela de progresso andar item a item
-        } else {
-          errors.push(
-            r.reason instanceof Error ? r.reason.message : String(r.reason),
-          );
+      if (pending.length === 0) break;
+      if (round > 0) {
+        console.warn(
+          `[kie] round ${round}: re-tentando ${pending.length} item(ns)`,
+        );
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+
+      for (let i = 0; i < pending.length; i += CONCURRENCY) {
+        const batch = pending.slice(i, i + CONCURRENCY);
+        const settled = await Promise.allSettled(
+          batch.map((idx) =>
+            generateOne(
+              key,
+              req,
+              caps[idx],
+              refUrls,
+              // a cada round pega a próxima "volta" do pool → pose diferente
+              variationFor(req.flowType, idx + round * req.quantity),
+              (idx % 6) + 1,
+            ).then((item) => ({ idx, item })),
+          ),
+        );
+        for (const r of settled) {
+          if (r.status === "fulfilled") {
+            done.set(r.value.idx, r.value.item);
+            onItem?.(r.value.item); // progresso anda item a item
+          } else {
+            errors.push(
+              r.reason instanceof Error ? r.reason.message : String(r.reason),
+            );
+            console.warn(
+              `[kie] item falhou: ${
+                r.reason instanceof Error ? r.reason.message : String(r.reason)
+              }`,
+            );
+          }
         }
       }
     }
 
-    if (items.length === 0)
+    if (done.size === 0)
       throw new Error(errors[0] ?? "Falha na geração (Kie).");
+    if (done.size < req.quantity) {
+      throw new Error(
+        `Geramos ${done.size} de ${req.quantity} imagens. ` +
+          `Tente novamente — você não será cobrado.`,
+      );
+    }
+
+    // Devolve na ordem dos índices (1..N), legendas/poses batendo com o plano.
+    const items = Array.from({ length: req.quantity }, (_, i) => done.get(i)!);
     return { items };
   },
 };
