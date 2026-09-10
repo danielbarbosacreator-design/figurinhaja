@@ -31,8 +31,12 @@ const BASE = process.env.KIE_BASE_URL || "https://api.kie.ai";
 
 // Modelo principal. KIE_MODEL troca sem mexer no código. Mantém FLUX_MODEL como
 // alias legado para não quebrar .env.local antigos.
+// Padrão: flux-kontext-pro. O nano-banana (google/nano-banana-edit) faz
+// figurinhas mais bonitas e com fundo transparente, MAS recusa com frequência
+// figura política ("flagged as sensitive") — o que travava a tela de geração.
+// KIE_MODEL=google/nano-banana-edit religa o nano-banana quando quiser testar.
 const MODEL =
-  process.env.KIE_MODEL || process.env.FLUX_MODEL || "google/nano-banana-edit";
+  process.env.KIE_MODEL || process.env.FLUX_MODEL || "flux-kontext-pro";
 // Quando não há referência nenhuma, nano-banana-edit não serve (exige imagem):
 // cai no modelo texto→imagem da mesma família.
 const TEXT_MODEL = process.env.KIE_TEXT_MODEL || "google/nano-banana";
@@ -121,12 +125,11 @@ async function uploadRef(key: string, ref: ImageRef): Promise<string> {
 const STICKER_STYLE =
   "Estilo: figurinha (sticker) premium para WhatsApp — ilustração vetorial " +
   "limpa e moderna, contorno/borda branca grossa e uniforme por toda a " +
-  "silhueta, recorte limpo, FUNDO TOTALMENTE TRANSPARENTE (sem cenário, sem " +
-  "fundo colorido, sem sombra projetada), formato PNG, cores vivas, alta " +
-  "nitidez, personagem centralizado com margem de folga em volta, " +
-  "enquadramento do corpo inteiro ou da cintura para cima, iluminação boa e " +
-  "uniforme, rosto bem definido, mãos corretas, aparência descontraída e " +
-  "simpática.";
+  "silhueta, recorte limpo. FUNDO 100% TRANSPARENTE (PNG com canal alfa, " +
+  "nenhum pixel de fundo, sem cenário, sem cor de fundo, sem sombra no chão). " +
+  "Cores vivas, alta nitidez, personagem centralizado com margem de folga em " +
+  "volta, enquadramento do corpo inteiro ou da cintura para cima, iluminação " +
+  "uniforme, rosto bem definido, mãos corretas, aparência descontraída.";
 
 // Estilo do fluxo "user_photo" — foto realista, NUNCA figurinha.
 const PHOTO_STYLE =
@@ -172,8 +175,8 @@ const POOL_CANDIDATE = [
 const POOL_USER_CANDIDATE = [
   "os dois lado a lado tirando uma selfie juntos, sorrindo para a câmera, rostos próximos",
   "os dois lado a lado fazendo joinha, sorrindo animados",
-  "a pessoa do usuário apontando para o candidato ao lado, os dois rindo",
-  "os dois lado a lado, o candidato com o braço sobre o ombro da pessoa do usuário, abraço amigável",
+  "a pessoa do usuário apontando para a pessoa ao lado, os dois rindo",
+  "os dois lado a lado, um com o braço sobre o ombro do outro, abraço amigável",
   "os dois fazendo sinal de paz, expressão descontraída",
   "os dois lado a lado rindo juntos, clima de amigos de longa data",
   "os dois fazendo coração com as mãos, expressão simpática",
@@ -205,9 +208,10 @@ function variationFor(flow: GenerationRequest["flowType"], index: number): strin
 }
 
 /**
- * Monta o prompt interno. Ordem de prioridade embutida (briefing):
- * 1º identidade facial · 2º duas identidades distintas · 3º anatomia ·
- * 4º pose automática · 5º acessórios · 6º estilo.
+ * Monta o prompt interno. Curto e leve de propósito: prompt longo com muita
+ * ênfase em "preservar identidade / não substituir rosto" em cima de uma
+ * pessoa real dispara o filtro de conteúdo do modelo. Aqui é uma caricatura
+ * divertida — nada de vocabulário político ("candidato", "eleitor", "comício").
  */
 function promptFor(
   req: GenerationRequest,
@@ -218,45 +222,30 @@ function promptFor(
   const name = req.candidate.name;
   const twoPeople = req.flowType !== "candidate_pack";
 
-  let identity: string;
+  let subject: string;
   if (twoPeople) {
-    identity =
-      `Duas pessoas DIFERENTES e reconhecíveis juntas: a pessoa da 1ª foto de ` +
-      `referência (o usuário) e ${name}` +
-      (refCount >= 2
-        ? ` (2ª foto de referência)`
-        : ` (mantenha a semelhança real de ${name})`) +
-      `. Preserve com fidelidade o rosto de CADA uma, separadamente. Nunca use ` +
-      `o mesmo rosto nas duas, não funda nem troque os rostos, não substitua ` +
-      `nenhuma delas e não crie uma terceira pessoa.`;
+    subject =
+      `Duas pessoas juntas: a pessoa da 1ª foto e ${name}` +
+      (refCount >= 2 ? ` (2ª foto)` : ``) +
+      `. Mantenha cada rosto, cabelo e barba iguais aos da própria foto; ` +
+      `são duas pessoas distintas, não repita o mesmo rosto nas duas.`;
   } else {
-    identity =
-      `${name}, sozinho, sem nenhuma outra pessoa na imagem. Preserve com ` +
-      `fidelidade o rosto e a identidade de ${name} a partir da(s) foto(s) de ` +
-      `referência — o rosto é consistente mesmo mudando roupa, acessório e pose.`;
+    subject =
+      `${name}, sozinho. Mantenha rosto, cabelo, barba e traços marcantes ` +
+      `iguais aos da foto de referência, em estilo de caricatura simpática.`;
   }
 
-  const scene = twoPeople
-    ? `Cena: ${variation}.`
-    : `Cena: ${name} ${variation}.`;
-
+  const scene = twoPeople ? `${variation}.` : `${name} ${variation}.`;
   const style = req.flowType === "user_photo" ? PHOTO_STYLE : STICKER_STYLE;
-
   const legenda = caption
-    ? `Inclua o texto "${caption}" em uma faixa/balão de adesivo, letras ` +
-      `grandes e 100% legíveis, sem cortar nem distorcer as letras.`
-    : `Não inclua nenhum texto, letra ou marca d'água.`;
+    ? `Inclua o texto "${caption}" em uma faixa de adesivo, grande e legível, ` +
+      `sem cortar letras.`
+    : `Sem nenhum texto.`;
 
-  const priority =
-    `Prioridade: a identidade facial correta vem acima de qualquer acessório ` +
-    `ou pose — nunca sacrifique o rosto para cumprir um gesto. Anatomia ` +
-    `correta (mãos, dedos, olhos, boca). Nada cortado: cabeça, mãos, chapéu e ` +
-    `boné sempre inteiros dentro do quadro.`;
-
-  return [identity, scene, style, legenda, priority, NEGATIVE, STYLE_EXTRA]
+  return [subject, scene, style, legenda, NEGATIVE, STYLE_EXTRA]
     .filter(Boolean)
     .join(" ")
-    .slice(0, 1600);
+    .slice(0, 900);
 }
 
 /* ── Submissão / polling: FLUX Kontext ─────────────────────────────────── */
@@ -521,9 +510,10 @@ export const fluxGenerator: ImageGenerator = {
     const done = new Map<number, GeneratedItem>();
     const errors: string[] = [];
 
-    // Round 0 = tentativa normal; rounds seguintes só re-tentam o que faltou,
-    // com uma variação diferente (o modelo às vezes recusa uma pose/acessório).
-    const MAX_ROUNDS = 3;
+    // Round 0 = tentativa normal. Round 1 = re-tenta o que faltou com uma
+    // variação neutra e simples (menos chance de recusa). Só 1 retry para não
+    // deixar a tela girando minutos.
+    const MAX_ROUNDS = 2;
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const pending = Array.from({ length: req.quantity }, (_, i) => i).filter(
         (i) => !done.has(i),
@@ -533,7 +523,7 @@ export const fluxGenerator: ImageGenerator = {
         console.warn(
           `[kie] round ${round}: re-tentando ${pending.length} item(ns)`,
         );
-        await new Promise((r) => setTimeout(r, 1500));
+        await new Promise((r) => setTimeout(r, 1000));
       }
 
       for (let i = 0; i < pending.length; i += CONCURRENCY) {
@@ -545,8 +535,9 @@ export const fluxGenerator: ImageGenerator = {
               req,
               caps[idx],
               refUrls,
-              // a cada round pega a próxima "volta" do pool → pose diferente
-              variationFor(req.flowType, idx + round * req.quantity),
+              round === 0
+                ? variationFor(req.flowType, idx)
+                : "retrato simpático, sorrindo, olhando para a câmera",
               (idx % 6) + 1,
             ).then((item) => ({ idx, item })),
           ),

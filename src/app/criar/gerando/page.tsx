@@ -144,13 +144,13 @@ export default function GerandoPage() {
         return true;
       }
       const elapsed = Date.now() - startedAt.current;
-      // Rede de segurança: só desiste depois de MUITO tempo (um pack grande
-      // pode passar de 5 min). Antes disso a barra continua andando sozinha.
-      if (elapsed > 720_000) {
+      // Rede de segurança: um pack de 20 com 1 retry fica em ~3-4 min. Depois
+      // disso algo travou de verdade — mostra "tentar de novo".
+      if (elapsed > 300_000) {
         setPhase("failed");
         return true;
       }
-      if (elapsed > 90_000) setPhase("slow");
+      if (elapsed > 45_000) setPhase("slow");
       return false;
     },
     {
