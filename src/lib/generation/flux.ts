@@ -73,6 +73,15 @@ const CONCURRENCY = Math.max(
 const UPSCALE_ON = process.env.FLUX_UPSCALE === "1";
 const UPSCALE_MODEL = process.env.FLUX_UPSCALE_MODEL || "recraft/crisp-upscale";
 
+// Recorte de fundo (Recraft Remove Background via Kie "jobs") — deixa a
+// figurinha com fundo 100% transparente (PNG alfa). O FLUX Kontext nem sempre
+// entrega transparente sozinho; este passo garante. Só nos fluxos de figurinha,
+// nunca na foto realista. +~10-20s por figurinha. KIE_BG_REMOVE=0 desliga.
+const BG_REMOVE_ON = process.env.KIE_BG_REMOVE !== "0";
+const BG_REMOVE_MODEL =
+  process.env.KIE_BG_REMOVE_MODEL || "recraft/remove-background";
+const BG_REMOVE_TIMEOUT_MS = 60_000;
+
 function apiKey(): string {
   const k = process.env.KIE_API_KEY || process.env.BFL_API_KEY;
   if (!k || /^COLE/.test(k)) {
@@ -369,6 +378,21 @@ async function upscale(key: string, imageUrl: string): Promise<string | null> {
   }
 }
 
+/** Recorte de fundo best-effort: erro/timeout devolve a URL original. */
+async function removeBackground(key: string, imageUrl: string): Promise<string> {
+  try {
+    const taskId = await jobsSubmit(key, BG_REMOVE_MODEL, { image: imageUrl });
+    return await jobsPoll(key, taskId, BG_REMOVE_TIMEOUT_MS);
+  } catch (err) {
+    console.warn(
+      `[kie] remoção de fundo falhou, mantendo original: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return imageUrl;
+  }
+}
+
 async function generateOne(
   key: string,
   req: GenerationRequest,
@@ -402,7 +426,13 @@ async function generateOne(
     baseUrl = await jobsPoll(key, taskId, POLL_TIMEOUT_MS);
   }
 
-  const resultUrl = (UPSCALE_ON && (await upscale(key, baseUrl))) || baseUrl;
+  const upscaledUrl = (UPSCALE_ON && (await upscale(key, baseUrl))) || baseUrl;
+
+  // Figurinha: garante fundo transparente. Foto realista: nunca recorta.
+  const resultUrl =
+    BG_REMOVE_ON && req.flowType !== "user_photo"
+      ? await removeBackground(key, upscaledUrl)
+      : upscaledUrl;
 
   const img = await fetch(resultUrl);
   if (!img.ok) throw new Error(`Kie download ${img.status}`);
